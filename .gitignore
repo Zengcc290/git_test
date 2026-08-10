@@ -29,3 +29,24 @@ out/
 node_modules/
 vendor/
 
+# RAG generated data and local artifacts
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/chunks/*
+!data/chunks/.gitkeep
+data/indexes/*
+!data/indexes/.gitkeep
+experiments/**/outputs/
+*.sqlite
+*.sqlite3
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/

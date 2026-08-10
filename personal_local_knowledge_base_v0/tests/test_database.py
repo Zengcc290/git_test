@@ -1,0 +1,54 @@
+# 使用临时目录隔离数据库文件，测试完成后自动清理。
+import tempfile
+import unittest
+from pathlib import Path
+
+# 导入数据库门面和两个用于构造测试数据的模型。
+from knowledge_search.database import KnowledgeBase
+from knowledge_search.models import Chunk, ExtractedDocument
+
+
+class DatabaseTests(unittest.TestCase):
+    def test_fts5_search_and_replace_document(self):
+        # 每次测试创建独立的临时 SQLite 数据库。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "knowledge.db"
+            source_path = Path(temp_dir) / "note.md"
+            # 创建一个与数据库记录对应的源文件路径。
+            source_path.write_text("SQLite note", encoding="utf-8")
+            # 手工构造抽取结果，隔离数据库层测试与文件抽取层。
+            document = ExtractedDocument(
+                path=source_path.resolve(),
+                file_type="md",
+                text="SQLite note",
+                sha256="hash-1",
+                size=11,
+                modified_ns=1,
+            )
+
+            with KnowledgeBase(db_path) as knowledge_base:
+                # 写入一个分段后，用 FTS5 搜索它。
+                knowledge_base.replace_document(document, [Chunk(0, "SQLite note")])
+                results = knowledge_base.search("sqlite")
+                self.assertEqual(len(results), 1)
+                self.assertIn("<mark>SQLite</mark>", results[0].highlighted_content)
+                self.assertEqual(knowledge_base.document_count(), 1)
+                self.assertEqual(knowledge_base.chunk_count(), 1)
+
+                # 替换同一路径文档，验证旧内容会从 FTS5 中消失。
+                newer = ExtractedDocument(
+                    path=document.path,
+                    file_type="md",
+                    text="FTS5 replacement",
+                    sha256="hash-2",
+                    size=16,
+                    modified_ns=2,
+                )
+                knowledge_base.replace_document(newer, [Chunk(0, "FTS5 replacement")])
+                self.assertEqual(knowledge_base.search("sqlite"), [])
+                self.assertEqual(len(knowledge_base.search("FTS5")), 1)
+
+
+if __name__ == "__main__":
+    # 允许直接执行本测试文件。
+    unittest.main()
