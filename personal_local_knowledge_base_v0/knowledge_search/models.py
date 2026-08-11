@@ -12,8 +12,8 @@ class ExtractedDocument:
     path: Path
     # 文件类型，例如 ``txt``、``md`` 或 ``pdf``。
     file_type: str
-    # 从文件中抽取出的原始文本，清洗动作在索引阶段执行。
-    text: str
+    # 兼容旧接口的全文字段；实际文件抽取时为 None，索引使用流式迭代器。
+    text: str | None
     # 原始文件内容的 SHA-256，用于判断是否需要增量重建索引。
     sha256: str
     # 文件字节大小，用于保存文档元数据。

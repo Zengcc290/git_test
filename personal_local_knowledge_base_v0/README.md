@@ -1,13 +1,15 @@
 # 个人本地知识库搜索工具 V0
 
-这是一个不带聊天机器人的本地文档搜索引擎。它把 `.txt`、`.md` 和 PDF 文本导入 SQLite，清洗并分段后使用 SQLite FTS5 做关键词搜索，命令行返回带高亮的上下文。
+这是一个不带聊天机器人的本地文档搜索引擎。它把 `.txt`、`.md`、PDF 和 `.pptx` 文本导入 SQLite，清洗并分段后使用 SQLite FTS5 做关键词搜索，命令行返回带高亮的上下文。
 
 ## 功能
 
-- 导入 TXT、Markdown、PDF 文本
+- 导入 TXT、Markdown、PDF 和 PPTX 文本
+- 流式读取、清洗、分段和写入，避免大文件全文同时驻留内存
 - 统一换行和空白，保留标题与正文
 - 按段落分段，超长段落按标点/空格切分并保留重叠
 - SQLite 文档表、分段表和 FTS5 全文索引
+- jieba 中文词索引优先检索，原始 FTS5 和参数化 LIKE 分级兜底
 - 文件 SHA-256 增量索引，重复运行会跳过未变化文件
 - 命令行查询、结果排序、路径/分段信息和命中高亮
 - 控制台日志、文件日志、单文件异常隔离
@@ -68,7 +70,7 @@ py -m venv .venv
 
 ```text
 knowledge_search/       核心 Python 包
-  extractors.py          TXT/Markdown/PDF 抽取
+  extractors.py          TXT/Markdown/PDF/PPTX 抽取
   cleaning.py            文本清洗
   chunking.py            文本分段
   database.py            SQLite 与 FTS5
@@ -88,6 +90,10 @@ docs/experiment-log.md   实验记录
 
 测试只使用临时目录，不会污染正式数据库。SQLite FTS5 需要当前 Python 自带的 SQLite 编译时启用；本项目已在开发环境中验证。
 
+索引过程不会调用 `read_bytes()` 读取整个文件。TXT/Markdown 按固定大小读取并增量解码，PDF 按页抽取，PPTX 按幻灯片抽取；清洗器、分段器和 SQLite 写入也通过迭代器逐步传递数据。内存占用主要取决于单个读取块、当前分段和底层 PDF/PPTX 库的页面/演示文稿对象，而不是整个文档的文本总量。
+
+搜索会优先使用 jieba 生成的中文词索引，再由 FTS5 的 BM25 计算相关性；如果 jieba 词索引没有命中，会回退到原始文本 FTS5，最后才使用参数化 `LIKE`。因此 jieba 负责改善中文词边界和召回，FTS5 负责排序，二者不是互相替代关系。
+
 ## V0 范围与限制
 
-V0 只做关键词搜索，不做问答、对话、Embedding、向量数据库和远程 API。PDF 仅支持有文本层的文件，扫描版 PDF 暂不做 OCR。SQLite FTS5 的 `unicode61` 对连续中文的分词有限，因此中文关键词在 FTS5 无命中时会使用参数化 `LIKE` 兜底，排序能力后续再改进。
+V0 只做关键词搜索，不做问答、对话、Embedding、向量数据库和远程 API。PDF 仅支持有文本层的文件，扫描版 PDF 暂不做 OCR；PPTX 目前抽取幻灯片文本框、标题、表格和组合图形文字，不处理图片中的文字、图表内部文字或演讲者备注。jieba 词索引会增加首次建库时间和少量磁盘占用，但可以减少中文查询对低相关 `LIKE` 结果的依赖。

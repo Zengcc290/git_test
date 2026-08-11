@@ -8,6 +8,8 @@ import argparse
 import logging
 # sqlite3.Error 用于捕获数据库层异常并转换为 CLI 失败状态。
 import sqlite3
+# sys 用于调整 Windows 控制台的标准输出编码。
+import sys
 # Path 让数据库、日志和索引输入参数支持跨平台路径。
 from pathlib import Path
 # Sequence 允许 main 接收 list、tuple 等不同形式的参数集合。
@@ -23,6 +25,23 @@ from .logging_config import configure_logging
 logger = logging.getLogger(__name__)
 
 
+def _configure_console_encoding() -> None:
+    """保留终端原有编码，并避免特殊字符导致 Windows CLI 打印失败。"""
+
+    # Python 3.7+ 的文本流支持 reconfigure，可以在不替换流对象的情况下调整编码。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            # 测试中的自定义流可能没有 reconfigure，保持原流不变即可。
+            continue
+        try:
+            # 保留当前编码以兼容 PowerShell，同时替换编码无法表示的字符。
+            reconfigure(errors="replace")
+        except (OSError, ValueError):
+            # 某些被重定向或已关闭的流不能重新配置，忽略即可。
+            continue
+
+
 def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     # 这些运行时选项同时提供给 index、search、stats 和 init-db。
     parser.add_argument(
@@ -31,12 +50,14 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
         default=Path("data/knowledge.db"),
         help="SQLite 数据库路径（默认：data/knowledge.db）",
     )
+    
     parser.add_argument(
         "--log-file",
         type=Path,
         default=Path("logs/app.log"),
         help="日志文件路径（默认：logs/app.log）",
     )
+
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -55,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # index 命令接受一个或多个文件/目录，并提供分段参数。
-    index_parser = subparsers.add_parser("index", help="导入并索引 TXT、Markdown、PDF 文件")
+    index_parser = subparsers.add_parser("index", help="导入并索引 TXT、Markdown、PDF、PPTX 文件")
     index_parser.add_argument("paths", nargs="+", type=Path, help="文件或目录，可重复传入")
     index_parser.add_argument("--chunk-size", type=int, default=800, help="分段目标字符数")
     index_parser.add_argument("--overlap", type=int, default=100, help="超长段落的重叠字符数")
@@ -145,6 +166,8 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # 先处理输出编码，再解析参数和执行命令，覆盖帮助、索引和搜索输出。
+    _configure_console_encoding()
     # argv=None 时由 argparse 从 sys.argv 读取；测试时可传入列表避免启动子进程。
     args = build_parser().parse_args(argv)
     try:

@@ -9,11 +9,11 @@ from collections.abc import Iterable, Iterator
 # Path 负责跨平台的目录递归和扩展名判断。
 from pathlib import Path
 
-# 索引流水线依次调用清洗、分段和数据库写入模块。
-from .chunking import chunk_text
-from .cleaning import clean_text
+# 索引流水线依次调用流式清洗、流式分段和数据库写入模块。
+from .chunking import iter_chunk_text
+from .cleaning import iter_clean_text
 from .database import KnowledgeBase
-from .extractors import SUPPORTED_SUFFIXES, extract_document
+from .extractors import SUPPORTED_SUFFIXES, extract_document, iter_document_text
 from .models import IndexStats
 
 
@@ -69,35 +69,31 @@ def index_paths(
                 logger.info("跳过未变化文件：%s", path)
                 continue
 
-            cleaned = clean_text(document.text)
-            if not cleaned:
-                # 文件可能从有内容变成空文件，必须移除旧分段，避免搜索到过期内容。
+            # 抽取器、清洗器和分段器全部返回迭代器，不在索引器中保存全文。
+            source_text = iter_document_text(document)
+            cleaned_text = iter_clean_text(source_text)
+            chunks = iter_chunk_text(cleaned_text, chunk_size=chunk_size, overlap=overlap)
+
+            # 用计数器包装分段流，只记录数量，不保存已经写入数据库的分段。
+            chunk_count = 0
+
+            def counted_chunks():
+                nonlocal chunk_count
+                for chunk in chunks:
+                    chunk_count += 1
+                    yield chunk
+
+            # 在事务中替换旧文档，并由数据库层逐个消费分段生成器。
+            knowledge_base.replace_document(document, counted_chunks())
+            if chunk_count == 0:
+                # 文件可能从有内容变成空文件，清理刚写入的空记录和旧索引。
                 knowledge_base.remove_document(document.path)
                 stats.empty += 1
                 logger.warning("文件没有可索引文本：%s", path)
                 continue
 
-            chunks = chunk_text(cleaned, chunk_size=chunk_size, overlap=overlap)
-            if not chunks:
-                # 理论上清洗后的非空文本应有分段，这里仍保留安全兜底。
-                knowledge_base.remove_document(document.path)
-                stats.empty += 1
-                logger.warning("文件分段结果为空：%s", path)
-                continue
-
-            # 将清洗后的正文放回文档对象，便于后续调用者获得一致状态。
-            document = document.__class__(
-                path=document.path,
-                file_type=document.file_type,
-                text=cleaned,
-                sha256=document.sha256,
-                size=document.size,
-                modified_ns=document.modified_ns,
-            )
-            # 在事务中替换旧文档并写入所有新分段。
-            knowledge_base.replace_document(document, chunks)
             stats.indexed += 1
-            logger.info("完成索引：%s（%s 个分段）", path, len(chunks))
+            logger.info("完成索引：%s（%s 个分段）", path, chunk_count)
         except Exception:
             # 单个文件失败不应中断整个目录；记录堆栈并累加失败数。
             stats.failed += 1

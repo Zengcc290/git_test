@@ -2,7 +2,7 @@
 import unittest
 
 # 被测函数：负责按段落和长度切分文本。
-from knowledge_search.chunking import chunk_text
+from knowledge_search.chunking import chunk_text, iter_chunk_text
 
 
 class ChunkingTests(unittest.TestCase):
@@ -27,6 +27,23 @@ class ChunkingTests(unittest.TestCase):
         # overlap 不能大于等于 chunk_size，否则窗口无法向前推进。
         with self.assertRaises(ValueError):
             chunk_text("text", chunk_size=10, overlap=10)
+
+    def test_streaming_chunker_consumes_text_blocks(self):
+        # 每次只提供一小块文本，验证分段器可以持续消费生成器。
+        source = ("流式文本块。" for _ in range(100))
+        chunks = list(iter_chunk_text(source, chunk_size=30, overlap=5))
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual([chunk.index for chunk in chunks], list(range(len(chunks))))
+
+    def test_streaming_chunks_keep_tail_head_overlap(self):
+        # 使用没有标点和空格的字符串，强制分段器走固定长度切分路径。
+        source = iter(["abcdefghijklmnopqrstuvwxyz" * 10])
+        chunks = list(iter_chunk_text(source, chunk_size=20, overlap=5))
+
+        # 每个相邻分段都必须共享上一段末尾的 5 个字符。
+        self.assertGreater(len(chunks), 1)
+        for previous, current in zip(chunks, chunks[1:]):
+            self.assertEqual(previous.content[-5:], current.content[:5])
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 import unittest
 
 # 被测函数：负责统一文本中的换行和空白。
-from knowledge_search.cleaning import clean_text
+from knowledge_search.cleaning import clean_text, iter_clean_text
 
 
 class CleaningTests(unittest.TestCase):
@@ -15,6 +15,12 @@ class CleaningTests(unittest.TestCase):
     def test_empty_text(self):
         # 只有空白的文本最终应被视为空文档。
         self.assertEqual(clean_text("   \n\n  "), "")
+
+    def test_streaming_cleaner_accepts_multiple_chunks(self):
+        # 模拟文件被分成多个读取块，验证块边界不会改变清洗结果。
+        chunks = iter(["  第一", "行\t内容\n\n", "\n第二行  "])
+        cleaned = "".join(iter_clean_text(chunks)).strip()
+        self.assertEqual(cleaned, "第一行 内容\n\n第二行")
 
 
 if __name__ == "__main__":

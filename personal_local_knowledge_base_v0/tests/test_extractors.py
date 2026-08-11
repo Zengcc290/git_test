@@ -6,9 +6,11 @@ from pathlib import Path
 # 用 pypdf 组装带文本层的最小 PDF。
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from pptx import Presentation
+from pptx.util import Inches
 
-# 被测函数：根据扩展名抽取文档并返回元数据。
-from knowledge_search.extractors import extract_document
+# 被测函数：元数据抽取和按块读取正文的迭代器。
+from knowledge_search.extractors import extract_document, iter_document_text
 
 
 class ExtractorTests(unittest.TestCase):
@@ -36,10 +38,37 @@ class ExtractorTests(unittest.TestCase):
             with path.open("wb") as handle:
                 writer.write(handle)
 
-            # 抽取后应识别 PDF 类型并得到内容流中的文本。
+            # 抽取后应识别 PDF 类型；正文通过迭代器按块取得。
             document = extract_document(path)
             self.assertEqual(document.file_type, "pdf")
-            self.assertIn("PDF search works", document.text)
+            self.assertIsNone(document.text)
+            self.assertIn("PDF search works", "".join(iter_document_text(document)))
+
+    def test_extracts_text_and_table_from_pptx(self):
+        # 生成一个包含文本框和表格的最小演示文稿，验证 PPTX 抽取路径。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "note.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+            # 文本框模拟标题或正文内容。
+            text_box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(1))
+            text_box.text = "PPTX search works"
+
+            # 表格内容应按行抽取，并参与全文搜索。
+            table = slide.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(5), Inches(2)).table
+            table.cell(0, 0).text = "反应物"
+            table.cell(0, 1).text = "氧化剂"
+            table.cell(1, 0).text = "还原剂"
+            table.cell(1, 1).text = "电子转移"
+            presentation.save(path)
+
+            document = extract_document(path)
+            self.assertEqual(document.file_type, "pptx")
+            self.assertIsNone(document.text)
+            text = "".join(iter_document_text(document))
+            self.assertIn("PPTX search works", text)
+            self.assertIn("氧化剂", text)
 
 
 if __name__ == "__main__":

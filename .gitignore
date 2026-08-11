@@ -24,6 +24,7 @@ dist/
 build/
 coverage/
 out/
+$out/
 
 # Dependency directories
 node_modules/

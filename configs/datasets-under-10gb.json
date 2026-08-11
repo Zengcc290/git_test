@@ -1,0 +1,118 @@
+{
+  "verified_on": "2026-08-11",
+  "project": "personal-local-knowledge-base-v0",
+  "size_policy": "source dataset or selected subset must be <= 10 GB",
+  "recommended_bundle": [
+    "zhwiki-20260501",
+    "thucnews",
+    "codesearchnet-hf"
+  ],
+  "datasets": [
+    {
+      "id": "zhwiki-20260501",
+      "name": "中文 Wikipedia JSONL 快照",
+      "kind": "fixed-snapshot",
+      "language": ["zh"],
+      "size_gb": 2.39,
+      "format": ["jsonl"],
+      "field": "text",
+      "license": "GFDL-1.3 and/or CC-BY-SA-4.0 according to source article",
+      "source": "https://huggingface.co/datasets/fjcanyue/wikipedia-zh-cn",
+      "official_source": "https://dumps.wikimedia.org/zhwiki/latest/",
+      "access": "public",
+      "project_adapter": "export text field to txt or md"
+    },
+    {
+      "id": "thucnews",
+      "name": "THUCNews",
+      "kind": "fixed-dataset",
+      "language": ["zh"],
+      "size_gb": 2.19,
+      "format": ["txt"],
+      "documents": 740000,
+      "license": "confirm data terms at the official download site; repository code is MIT",
+      "source": "https://github.com/thunlp/THUCTC",
+      "access": "official site form",
+      "project_adapter": "native txt import"
+    },
+    {
+      "id": "codesearchnet-hf",
+      "name": "CodeSearchNet derived dataset",
+      "kind": "fixed-dataset",
+      "language": ["multi-language-code"],
+      "size_gb": 0.492,
+      "format": ["parquet"],
+      "fields": ["comment", "code"],
+      "license": "preserve source repository licenses",
+      "source": "https://huggingface.co/datasets/sentence-transformers/codesearchnet",
+      "official_source": "https://github.com/github/CodeSearchNet",
+      "access": "public",
+      "project_adapter": "write comment and code to markdown"
+    },
+    {
+      "id": "the-stack-smol",
+      "name": "The Stack Smol",
+      "kind": "fixed-sample",
+      "language": ["multi-language-code"],
+      "size_gb": 2.95,
+      "format": ["parquet"],
+      "rows": 300000,
+      "license": "original repository licenses plus The Stack terms",
+      "source": "https://huggingface.co/datasets/bigcode/the-stack-smol",
+      "access": "gated contact-information agreement",
+      "project_adapter": "write content to markdown with lang/path metadata"
+    },
+    {
+      "id": "tinystories",
+      "name": "TinyStories",
+      "kind": "fixed-dataset",
+      "language": ["en"],
+      "size_gb": 7.62,
+      "format": ["txt", "parquet"],
+      "license": "CDLA-Sharing-1.0",
+      "source": "https://huggingface.co/datasets/roneneldan/TinyStories",
+      "access": "public",
+      "project_adapter": "native txt import"
+    },
+    {
+      "id": "chinesewebtext2-toxic",
+      "name": "ChineseWebText 2.0 toxicity subset",
+      "kind": "fixed-subset",
+      "language": ["zh"],
+      "size_gb": 3.16,
+      "format": ["json", "parquet"],
+      "rows": 1632620,
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/datasets/CASIA-LM/ChineseWebText2.0",
+      "access": "public",
+      "project_adapter": "export text field and retain toxicity metadata",
+      "warning": "safety/evaluation subset, not a general knowledge corpus"
+    },
+    {
+      "id": "arxiv-selected-pdf",
+      "name": "arXiv selected PDF tar shards",
+      "kind": "selected-shards",
+      "language": ["multi-language"],
+      "size_gb": 0.5,
+      "size_policy": "select 1-20 official ~500 MB tar shards, stop at <= 10 GB",
+      "format": ["pdf"],
+      "license": "per-paper license; link back to arXiv; requester-pays S3",
+      "source": "https://info.arxiv.org/help/bulk_data_s3.html",
+      "access": "requester-pays S3",
+      "project_adapter": "native pdf import"
+    },
+    {
+      "id": "stackexchange-selected-site",
+      "name": "Stack Exchange selected-site dump",
+      "kind": "selected-site",
+      "language": ["en", "multi-language"],
+      "size_gb": 1.0,
+      "size_policy": "select a site whose current archive is <= 10 GB",
+      "format": ["xml", "7z"],
+      "license": "CC-BY-SA-4.0 with attribution and author-link requirements",
+      "source": "https://archive.org/details/stackexchange",
+      "access": "public",
+      "project_adapter": "convert questions and answers to markdown"
+    }
+  ]
+}

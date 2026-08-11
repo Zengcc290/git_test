@@ -1,4 +1,4 @@
-"""SQLite 持久化和 FTS5 搜索。"""
+"""SQLite 持久化、jieba 中文索引和 FTS5 混合搜索。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from typing import Iterable
 from .highlighting import highlight_text, query_terms, to_fts_query
 # 这些数据模型让数据库层不直接暴露裸元组。
 from .models import Chunk, ExtractedDocument, SearchResult
+# jieba 词项用于构建第二套中文搜索索引。
+from .tokenization import tokenize_for_search, to_token_fts_query
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,38 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF content ON chunks BEGIN
     VALUES ('delete', old.id, old.content);
     INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
 END;
+
+-- 保存每个分段的 jieba 词序列，作为中文 FTS5 的外部内容表。
+CREATE TABLE IF NOT EXISTS chunk_tokens (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    tokens TEXT NOT NULL
+);
+
+-- 中文索引使用空格分隔的 jieba 词，仍由 SQLite FTS5 负责倒排和 BM25 排序。
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts_jieba USING fts5(
+    tokens,
+    content='chunk_tokens',
+    content_rowid='chunk_id',
+    tokenize='unicode61'
+);
+
+-- 新增词序列时同步写入中文 FTS5 索引。
+CREATE TRIGGER IF NOT EXISTS chunk_tokens_ai AFTER INSERT ON chunk_tokens BEGIN
+    INSERT INTO chunks_fts_jieba(rowid, tokens) VALUES (new.chunk_id, new.tokens);
+END;
+
+-- 删除词序列时同步删除中文 FTS5 索引。
+CREATE TRIGGER IF NOT EXISTS chunk_tokens_ad AFTER DELETE ON chunk_tokens BEGIN
+    INSERT INTO chunks_fts_jieba(chunks_fts_jieba, rowid, tokens)
+    VALUES ('delete', old.chunk_id, old.tokens);
+END;
+
+-- 更新词序列时先删除旧索引，再写入新索引。
+CREATE TRIGGER IF NOT EXISTS chunk_tokens_au AFTER UPDATE OF tokens ON chunk_tokens BEGIN
+    INSERT INTO chunks_fts_jieba(chunks_fts_jieba, rowid, tokens)
+    VALUES ('delete', old.chunk_id, old.tokens);
+    INSERT INTO chunks_fts_jieba(rowid, tokens) VALUES (new.chunk_id, new.tokens);
+END;
 """
 
 
@@ -104,10 +138,35 @@ class KnowledgeBase:
             self.connection.executescript(SCHEMA)
             # 显式提交初始化结果，确保后续查询立即可见。
             self.connection.commit()
+            # 旧版本数据库没有 jieba 词表，需要按分段逐条补建中文索引。
+            self._backfill_token_index()
         except sqlite3.DatabaseError:
             # 记录完整堆栈后继续抛出，让 CLI 返回失败状态码。
             logger.exception("初始化 SQLite 数据库失败：%s", self.db_path)
             raise
+
+    def _backfill_token_index(self) -> None:
+        """为已有 chunks 增量补建 jieba 词表，避免升级后中文索引为空。"""
+
+        chunk_count = self.connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        token_count = self.connection.execute("SELECT COUNT(*) FROM chunk_tokens").fetchone()[0]
+        if chunk_count == token_count:
+            # 数量一致时认为词表已经同步，避免每次启动都重复分词。
+            return
+
+        logger.info("正在补建 jieba 中文索引：%s 个分段", chunk_count)
+        with self.connection:
+            # 先清空旧词表，触发器会同步清理对应的 FTS5 内容。
+            self.connection.execute("DELETE FROM chunk_tokens")
+            rows = self.connection.execute("SELECT id, content FROM chunks ORDER BY id")
+            # 逐行分词并写入，避免把所有旧分段一次性加载到 Python 列表。
+            self.connection.executemany(
+                "INSERT INTO chunk_tokens(chunk_id, tokens) VALUES (?, ?)",
+                (
+                    (row["id"], " ".join(tokenize_for_search(row["content"])))
+                    for row in rows
+                ),
+            )
 
     def close(self) -> None:
         # 关闭连接，释放文件句柄和 WAL 相关资源。
@@ -124,8 +183,6 @@ class KnowledgeBase:
     def replace_document(self, document: ExtractedDocument, chunks: Iterable[Chunk]) -> int:
         """原子替换同路径文档；FTS5 通过触发器同步。"""
 
-        # 先物化生成器，保证后续 executemany 可以安全遍历一次。
-        chunk_list = list(chunks)
         with self.connection:
             # 找到同路径旧文档后先删除，外键和触发器会同步清理旧分段/索引。
             old = self.connection.execute(
@@ -150,16 +207,29 @@ class KnowledgeBase:
                 ),
             )
             document_id = int(cursor.lastrowid)
-            # 批量写入分段；chunks_ai 触发器会逐条同步到 FTS5。
+            # 批量消费分段迭代器；不会先把整个文档的 chunks 转成 list。
+            # chunks_ai 触发器会在每次插入后同步到 FTS5。
             self.connection.executemany(
                 """
                 INSERT INTO chunks(document_id, chunk_index, content, start_offset)
                 VALUES (?, ?, ?, ?)
                 """,
-                [
+                (
                     (document_id, chunk.index, chunk.content, chunk.start_offset)
-                    for chunk in chunk_list
-                ],
+                    for chunk in chunks
+                ),
+            )
+            # chunks 已经写入后，按分段逐条生成 jieba 词序列并同步中文索引。
+            new_chunks = self.connection.execute(
+                "SELECT id, content FROM chunks WHERE document_id = ? ORDER BY chunk_index",
+                (document_id,),
+            )
+            self.connection.executemany(
+                "INSERT INTO chunk_tokens(chunk_id, tokens) VALUES (?, ?)",
+                (
+                    (row["id"], " ".join(tokenize_for_search(row["content"])))
+                    for row in new_chunks
+                ),
             )
         # with self.connection 成功退出后事务已经提交，返回文档 ID 供调用方使用。
         return document_id
@@ -171,47 +241,71 @@ class KnowledgeBase:
         with self.connection:
             self.connection.execute("DELETE FROM documents WHERE path = ?", (str(path),))
 
+    def _search_fts_rows(
+        self,
+        table_name: str,
+        match_query: str,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        """在指定 FTS5 表中执行一次安全的关键词查询。"""
+
+        # table_name 只由本模块内部传入，不能直接使用用户输入，避免 SQL 注入。
+        if table_name not in {"chunks_fts", "chunks_fts_jieba"}:
+            raise ValueError(f"未知的 FTS5 表：{table_name}")
+
+        # 两套 FTS 表都通过 rowid 关联到同一份 chunks 正文和 documents 元数据。
+        return self.connection.execute(
+            f"""
+            SELECT
+                c.id AS chunk_id,
+                d.path AS document_path,
+                d.filename AS filename,
+                d.file_type AS file_type,
+                c.chunk_index AS chunk_index,
+                c.content AS content,
+                bm25({table_name}) AS score
+            FROM {table_name}
+            JOIN chunks AS c ON c.id = {table_name}.rowid
+            JOIN documents AS d ON d.id = c.document_id
+            WHERE {table_name} MATCH ?
+            ORDER BY score ASC, d.path ASC, c.chunk_index ASC
+            LIMIT ?
+            """,
+            (match_query, limit),
+        ).fetchall()
+
     def search(self, query: str, limit: int = 10) -> list[SearchResult]:
+        """先用 jieba 词索引搜索，再按顺序回退到原始 FTS5 和 LIKE。"""
+
         # 限制必须为正数，否则 LIMIT 的语义不符合 CLI 预期。
         if limit <= 0:
             raise ValueError("limit 必须大于 0")
-        # 将普通用户输入转换为安全的 FTS5 字面量 AND 查询。
-        match_query = to_fts_query(query)
+
+        # 普通查询保留给原始 FTS5 作为回退路径。
+        raw_query = to_fts_query(query)
+        token_query = to_token_fts_query(query)
+        rows: list[sqlite3.Row] = []
+
         try:
-            # 先走 FTS5，并用 bm25 计算相关性；分数越小越靠前。
-            rows = self.connection.execute(
-                """
-                SELECT
-                    c.id AS chunk_id,
-                    d.path AS document_path,
-                    d.filename AS filename,
-                    d.file_type AS file_type,
-                    c.chunk_index AS chunk_index,
-                    c.content AS content,
-                    bm25(chunks_fts) AS score
-                FROM chunks_fts
-                JOIN chunks AS c ON c.id = chunks_fts.rowid
-                JOIN documents AS d ON d.id = c.document_id
-                WHERE chunks_fts MATCH ?
-                ORDER BY score ASC, d.path ASC, c.chunk_index ASC
-                LIMIT ?
-                """,
-                (match_query, limit),
-            ).fetchall()
+            if token_query:
+                # 第一优先级：jieba 词序列 + FTS5 BM25，中文词边界更准确。
+                rows = self._search_fts_rows("chunks_fts_jieba", token_query, limit)
+            if not rows:
+                # 第二优先级：原始文本 FTS5，兼容 jieba 词切分不理想的查询。
+                rows = self._search_fts_rows("chunks_fts", raw_query, limit)
         except sqlite3.OperationalError as exc:
             # 将底层 SQLite 异常转换为 CLI 能理解的 ValueError。
             logger.exception("FTS5 搜索失败，查询=%r", query)
             raise ValueError(f"搜索失败：{exc}") from exc
 
-        # unicode61 对连续中文的分词能力有限。保留 FTS5 为主检索，
-        # 在包含中文且 FTS5 没有命中时用参数化 LIKE 兜底，确保 V0 对中文文档仍可用。
-        # 判断查询中是否包含中文字符，以决定是否启用 LIKE 兜底。
+        # unicode61 对连续中文的分词能力有限。两套 FTS5 都没命中时，
+        # 最后才使用参数化 LIKE 兜底，保证老数据库或特殊词仍有机会召回。
         contains_cjk = any(
             any("\u4e00" <= char <= "\u9fff" for char in term)
             for term in query_terms(query)
         )
         if not rows and contains_cjk:
-            # LIKE 词项与 FTS5 使用相同的 AND 语义，确保多个关键词都出现。
+            # LIKE 词项与 FTS5 使用相同的 AND 语义，避免无关结果过多。
             like_terms = query_terms(query)
             # 条件模板只由程序生成，真正的用户词仍通过参数绑定传入。
             where_clause = " AND ".join("c.content LIKE ?" for _ in like_terms)
