@@ -1,0 +1,18 @@
+{
+  "data": {
+    "items": [
+      {
+        "title": "SQLite 教程",
+        "content": "SQLite FTS5 可以用于本地全文搜索。",
+        "tags": ["数据库", "搜索"],
+        "status": "published"
+      },
+      {
+        "title": "暂不发布的草稿",
+        "content": "这条记录会被配置中的过滤条件排除。",
+        "tags": ["草稿"],
+        "status": "draft"
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "knowledge-items",
+  "record_path": "$.data.items[*]",
+  "index_mode": "record",
+  "filter": {
+    "path": "status",
+    "equals": "published"
+  },
+  "fields": [
+    {
+      "name": "标题",
+      "path": "title"
+    },
+    {
+      "name": "正文",
+      "path": "content"
+    },
+    {
+      "name": "标签",
+      "path": "tags[*]",
+      "join": "、"
+    }
+  ],
+  "separator": "\n"
+}

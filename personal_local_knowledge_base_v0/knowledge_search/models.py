@@ -20,6 +20,8 @@ class ExtractedDocument:
     size: int
     # 文件最后修改时间的纳秒表示，用于保存文档元数据。
     modified_ns: int
+    # 解析配置指纹；普通文档为空，JSON 配置变化时用于触发重新索引。
+    parser_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,49 @@ class SearchResult:
     highlighted_content: str
 
 
+@dataclass(frozen=True)
+class DocumentInfo:
+    """已索引文档及其可管理的统计信息。"""
+
+    document_id: int
+    path: str
+    filename: str
+    file_type: str
+    size: int
+    chunk_count: int
+    indexed_at: str
+
+
+@dataclass(frozen=True)
+class DatabaseHealth:
+    """数据库一致性检查结果。"""
+
+    document_count: int
+    chunk_count: int
+    chunks_fts_count: int
+    chunk_tokens_count: int
+    chunks_fts_jieba_count: int
+    issues: tuple[str, ...] = ()
+
+    @property
+    def healthy(self) -> bool:
+        return not self.issues
+
+
+@dataclass(frozen=True)
+class IndexProgress:
+    """索引器发出的单文件进度事件。"""
+
+    # 当前文件在本次索引任务中的序号，从 1 开始。
+    current: int
+    # 本次实际纳入处理的文件总数。
+    total: int
+    # 正在处理或刚处理完的文件路径。
+    path: Path
+    # ``processing``、``indexed``、``skipped``、``empty``、``oversized`` 或 ``failed``。
+    status: str
+
+
 @dataclass
 class IndexStats:
     # 本次发现的支持类型文件数量。
@@ -68,3 +113,5 @@ class IndexStats:
     empty: int = 0
     # 处理过程中发生异常的文件数量。
     failed: int = 0
+    # 因超过 JSON 大小上限而拒绝处理的文件数量。
+    oversized: int = 0

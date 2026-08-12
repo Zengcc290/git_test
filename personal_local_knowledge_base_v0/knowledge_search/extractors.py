@@ -13,11 +13,16 @@ from pathlib import Path
 from collections.abc import Iterator
 
 # 抽取结果统一使用这个数据模型传递给清洗和索引模块。
+from .json_parser import (
+    DEFAULT_MAX_JSON_SIZE,
+    JsonProfile,
+    iter_json_text,
+)
 from .models import ExtractedDocument
 
 
-# 目前 V0 支持纯文本、Markdown、带文本层的 PDF 和 PPTX。
-SUPPORTED_SUFFIXES = {".txt", ".md", ".pdf", ".pptx"}
+# 目前支持纯文本、Markdown、带文本层的 PDF、PPTX 和配置驱动的 JSON。
+SUPPORTED_SUFFIXES = {".txt", ".md", ".pdf", ".pptx", ".json"}
 # 单次读取的字节数；它限制 TXT/Markdown 的读取缓存大小。
 DEFAULT_READ_SIZE = 64 * 1024
 # 为当前模块创建独立 logger，便于按模块筛选日志。
@@ -159,7 +164,11 @@ def _iter_pptx_text(path: Path) -> Iterator[str]:
             yield "\n\n"
 
 
-def extract_document(path: Path) -> ExtractedDocument:
+def extract_document(
+    path: Path,
+    *,
+    parser_fingerprint: str = "",
+) -> ExtractedDocument:
     """读取文件元数据并流式计算哈希，不在这里一次性抽取全文。"""
 
     # 展开用户目录符号并转成绝对路径，确保数据库键稳定。
@@ -189,6 +198,7 @@ def extract_document(path: Path) -> ExtractedDocument:
         sha256=hasher.hexdigest(),
         size=stat.st_size,
         modified_ns=stat.st_mtime_ns,
+        parser_fingerprint=parser_fingerprint,
     )
 
 
@@ -196,6 +206,8 @@ def iter_document_text(
     document: ExtractedDocument,
     *,
     read_size: int = DEFAULT_READ_SIZE,
+    json_profile: JsonProfile | None = None,
+    max_json_size: int = DEFAULT_MAX_JSON_SIZE,
 ) -> Iterator[str]:
     """根据文档类型按块、按页或按幻灯片产生文本。"""
 
@@ -214,6 +226,15 @@ def iter_document_text(
         return
     if document.file_type == "pptx":
         yield from _iter_pptx_text(document.path)
+        return
+    if document.file_type == "json":
+        if json_profile is None:
+            raise ValueError("索引 JSON 文件必须提供 --json-config 配置文件")
+        yield from iter_json_text(
+            document.path,
+            json_profile,
+            max_size=max_json_size,
+        )
         return
 
     # extract_document 已经做过后缀校验，这里是对手工对象的额外保护。

@@ -5,10 +5,108 @@ from pathlib import Path
 
 # 导入数据库和完整索引流水线。
 from knowledge_search.database import KnowledgeBase
-from knowledge_search.indexer import index_paths
+from knowledge_search.indexer import discover_files, index_paths
+from knowledge_search.json_parser import JsonProfile
 
 
 class IndexerTests(unittest.TestCase):
+    def test_excludes_directories_deduplicates_inputs_and_limits_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "keep.txt").write_text("keep", encoding="utf-8")
+            (root / "nested").mkdir()
+            (root / "nested" / "also.txt").write_text("also", encoding="utf-8")
+            (root / "skip").mkdir()
+            (root / "skip" / "hidden.txt").write_text("hidden", encoding="utf-8")
+            (root / "generated").mkdir()
+            (root / "generated" / "ignored.txt").write_text("ignored", encoding="utf-8")
+
+            discovered = list(
+                discover_files(
+                    [root, root / "nested"],
+                    exclude_dirs=["skip", "generated/*"],
+                    max_files=2,
+                )
+            )
+
+            self.assertEqual(
+                discovered,
+                sorted((root / "keep.txt", root / "nested" / "also.txt")),
+            )
+
+    def test_json_config_is_not_indexed_when_inside_input_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_path = root / "items.json"
+            config_path = root / "json-config.json"
+            data_path.write_text(
+                '{"title": "searchable", "status": "published"}',
+                encoding="utf-8",
+            )
+            config_path.write_text(
+                '{"name": "items", "record_path": "$", "fields": ["title"]}',
+                encoding="utf-8",
+            )
+            profile = JsonProfile.from_file(config_path)
+
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                stats = index_paths(
+                    knowledge_base,
+                    [root, data_path],
+                    json_profile=profile,
+                )
+
+                self.assertEqual(stats.files_found, 1)
+                self.assertEqual(stats.indexed, 1)
+                self.assertEqual(knowledge_base.document_count(), 1)
+                self.assertEqual(knowledge_base.list_documents()[0].filename, "items.json")
+
+    def test_oversized_json_is_rejected_before_parsing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_path = root / "items.json"
+            config_path = root / "config.json"
+            data_path.write_text('{"title": "too large"}', encoding="utf-8")
+            config_path.write_text(
+                '{"name": "items", "record_path": "$", "fields": ["title"]}',
+                encoding="utf-8",
+            )
+            profile = JsonProfile.from_file(config_path)
+
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                stats = index_paths(
+                    knowledge_base,
+                    [data_path],
+                    json_profile=profile,
+                    max_json_size=1,
+                )
+
+                self.assertEqual(stats.oversized, 1)
+                self.assertEqual(stats.failed, 0)
+                self.assertEqual(knowledge_base.document_count(), 0)
+
+    def test_reports_single_file_progress_events(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "one.txt").write_text("one", encoding="utf-8")
+            (root / "two.txt").write_text("two", encoding="utf-8")
+            events = []
+
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                index_paths(
+                    knowledge_base,
+                    [root],
+                    progress_callback=events.append,
+                )
+
+            self.assertEqual([event.status for event in events], [
+                "processing",
+                "indexed",
+                "processing",
+                "indexed",
+            ])
+            self.assertEqual({event.total for event in events}, {2})
+
     def test_indexes_txt_and_markdown_incrementally(self):
         # 测试 TXT、Markdown、增量跳过和空文件清理。
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -20,7 +118,7 @@ class IndexerTests(unittest.TestCase):
             (root / "readme.md").write_text(
                 "# 本地知识库\n\nMarkdown 文档也可以被索引。", encoding="utf-8"
             )
-            # JSON 文件不在 SUPPORTED_SUFFIXES 中，应被忽略。
+            # 未提供 JSON 配置时，JSON 文件应被忽略。
             (root / "ignore.json").write_text("not indexed", encoding="utf-8")
 
             with KnowledgeBase(root / "knowledge.db") as knowledge_base:

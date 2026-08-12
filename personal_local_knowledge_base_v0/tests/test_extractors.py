@@ -1,21 +1,22 @@
-# 使用临时目录生成一次性 PDF，避免在项目中留下测试产物。
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
 
-# 用 pypdf 组装带文本层的最小 PDF。
-from pypdf import PdfWriter
-from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
-from pptx import Presentation
-from pptx.util import Inches
-
 # 被测函数：元数据抽取和按块读取正文的迭代器。
 from knowledge_search.extractors import extract_document, iter_document_text
 
+HAS_PYPDF = importlib.util.find_spec("pypdf") is not None
+HAS_PPTX = importlib.util.find_spec("pptx") is not None
+
 
 class ExtractorTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_PYPDF, "pypdf 未安装")
     def test_extracts_text_from_pdf_text_layer(self):
         # 这个测试只验证文本层抽取，不涉及 OCR。
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "note.pdf"
             # 创建一个空白页面，再手动附加 Helvetica 字体和内容流。
@@ -44,8 +45,12 @@ class ExtractorTests(unittest.TestCase):
             self.assertIsNone(document.text)
             self.assertIn("PDF search works", "".join(iter_document_text(document)))
 
+    @unittest.skipUnless(HAS_PPTX, "python-pptx 未安装")
     def test_extracts_text_and_table_from_pptx(self):
         # 生成一个包含文本框和表格的最小演示文稿，验证 PPTX 抽取路径。
+        from pptx import Presentation
+        from pptx.util import Inches
+
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "note.pptx"
             presentation = Presentation()

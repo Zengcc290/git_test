@@ -48,6 +48,25 @@ class DatabaseTests(unittest.TestCase):
                 self.assertEqual(knowledge_base.search("sqlite"), [])
                 self.assertEqual(len(knowledge_base.search("FTS5")), 1)
 
+    def test_health_check_reports_orphan_chunks_and_missing_token_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "knowledge.db"
+            with KnowledgeBase(db_path) as knowledge_base:
+                knowledge_base.connection.execute("PRAGMA foreign_keys = OFF")
+                knowledge_base.connection.execute(
+                    """
+                    INSERT INTO chunks(document_id, chunk_index, content, start_offset)
+                    VALUES (999, 0, 'orphan content', 0)
+                    """
+                )
+                knowledge_base.connection.commit()
+
+                report = knowledge_base.check_health()
+
+            self.assertFalse(report.healthy)
+            self.assertTrue(any("孤立" in issue for issue in report.issues))
+            self.assertTrue(any("chunk_tokens" in issue for issue in report.issues))
+
 
 if __name__ == "__main__":
     # 允许直接执行本测试文件。

@@ -1,4 +1,5 @@
 # 使用标准库 unittest 验证 jieba 词索引查询的基本行为。
+import importlib.util
 import unittest
 
 # 导入文本分词和 FTS5 查询构造函数。
@@ -10,15 +11,24 @@ class TokenizationTests(unittest.TestCase):
         # 这个查询应被拆成多个有意义的中文词，而不是一个连续长字符串。
         query = "氧化还原反应"
         tokens = tokenize_for_search(query)
-        self.assertIn("氧化", tokens)
-        self.assertIn("还原", tokens)
-        self.assertIn("反应", tokens)
+        if importlib.util.find_spec("jieba") is None:
+            self.assertEqual(tokens, ["氧", "化", "还", "原", "反", "应"])
+        else:
+            self.assertIn("氧化", tokens)
+            self.assertIn("还原", tokens)
+            self.assertIn("反应", tokens)
 
     def test_builds_and_fts_query(self):
         # 词项之间使用 AND，避免只命中一个词时返回过多无关内容。
         query = "氧化还原反应"
         fts_query = to_token_fts_query(query)
-        self.assertEqual(fts_query, '"氧化" AND "还原" AND "反应"')
+        if importlib.util.find_spec("jieba") is None:
+            self.assertEqual(
+                fts_query,
+                '"氧" AND "化" AND "还" AND "原" AND "反" AND "应"',
+            )
+        else:
+            self.assertEqual(fts_query, '"氧化" AND "还原" AND "反应"')
 
     def test_blank_query_returns_empty_token_query(self):
         # 纯空白没有有效词项，交给原始查询层处理错误或兜底。
