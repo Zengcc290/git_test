@@ -20,6 +20,7 @@ from .database import KnowledgeBase
 from .extractors import SUPPORTED_SUFFIXES, extract_document, iter_document_text
 from .json_parser import (
     DEFAULT_MAX_JSON_SIZE,
+    DEFAULT_JSON_RECORD_PROBE_SIZE,
     JsonProfile,
     JsonSizeLimitError,
     ensure_json_size,
@@ -191,9 +192,27 @@ def _iter_index_chunks(
         )
         return
 
+    source_iterator = iter(text_chunks)
     chunk_index = 0
-    for record_text in text_chunks:
-        cleaned_text = iter_clean_text([record_text])
+    while True:
+        try:
+            first_block = next(source_iterator)
+        except StopIteration:
+            break
+
+        def record_blocks():
+            """消费当前记录的块，不把超大记录拼回单个字符串。"""
+
+            block = first_block
+            yield block
+            if not getattr(block, "record_end", True):
+                while True:
+                    block = next(source_iterator)
+                    yield block
+                    if getattr(block, "record_end", True):
+                        break
+
+        cleaned_text = iter_clean_text(record_blocks())
         for chunk in iter_chunk_text(
             cleaned_text,
             chunk_size=chunk_size,
@@ -219,12 +238,15 @@ def index_paths(
     exclude_files: Iterable[Path] = (),
     max_files: int | None = None,
     max_json_size: int = DEFAULT_MAX_JSON_SIZE,
+    json_record_probe_size: int = DEFAULT_JSON_RECORD_PROBE_SIZE,
     progress_callback: Callable[[IndexProgress], None] | None = None,
 ) -> IndexStats:
     # stats 汇总本次索引结果，供日志和 CLI 摘要使用。
     stats = IndexStats()
     if max_json_size < 0:
         raise ValueError("JSON 最大文件大小不能小于 0")
+    if json_record_probe_size <= 0:
+        raise ValueError("JSON 单条记录探测窗口必须大于 0")
 
     excluded_files = list(exclude_files)
     # 配置文件可能位于待索引目录中；它是规则而不是知识内容，必须从候选
@@ -290,6 +312,7 @@ def index_paths(
                 document,
                 json_profile=profile,
                 max_json_size=max_json_size,
+                json_record_probe_size=json_record_probe_size,
             )
             chunks = _iter_index_chunks(
                 source_text,

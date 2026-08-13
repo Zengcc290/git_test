@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from knowledge_search.cli import main
+from knowledge_search.cli import build_parser, main
 
 
 def _reset_logging_handlers() -> None:
@@ -17,6 +17,21 @@ def _reset_logging_handlers() -> None:
 
 
 class CLIIntegrationTests(unittest.TestCase):
+    def test_size_options_accept_human_readable_units(self):
+        args = build_parser().parse_args(
+            [
+                "index",
+                "items.json",
+                "--max-json-size",
+                "1GB",
+                "--json-record-probe-size",
+                "512MB",
+            ]
+        )
+
+        self.assertEqual(args.max_json_size, 1024**3)
+        self.assertEqual(args.json_record_probe_size, 512 * 1024**2)
+
     def test_json_structure_command_reports_streamed_schema(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

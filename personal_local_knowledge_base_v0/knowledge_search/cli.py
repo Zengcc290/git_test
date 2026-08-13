@@ -21,8 +21,10 @@ from .highlighting import highlight_text
 from .indexer import index_paths
 from .json_parser import (
     DEFAULT_MAX_JSON_SIZE,
+    DEFAULT_JSON_RECORD_PROBE_SIZE,
     JsonProfile,
     inspect_json_structure,
+    parse_size,
     parse_json_preview,
 )
 from .logging_config import configure_logging
@@ -111,11 +113,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index_parser.add_argument(
         "--max-json-size",
-        type=int,
+        type=parse_size,
         default=DEFAULT_MAX_JSON_SIZE,
         help=(
-            "JSON 最大字节数；0 表示不限制，默认："
-            f"{DEFAULT_MAX_JSON_SIZE}"
+            "JSON 最大大小，支持 B/KB/MB/GB/TB；0 表示不限制，默认：512MB"
+        ),
+    )
+    index_parser.add_argument(
+        "--json-record-probe-size",
+        type=parse_size,
+        default=DEFAULT_JSON_RECORD_PROBE_SIZE,
+        help=(
+            "单条 JSON 记录探测窗口，支持 B/KB/MB/GB/TB；"
+            "超过后改为原始分块流，默认：512MB"
         ),
     )
     _add_runtime_options(index_parser)
@@ -140,9 +150,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preview_parser.add_argument(
         "--max-json-size",
-        type=int,
-        default=DEFAULT_MAX_JSON_SIZE,
-        help="JSON 最大字节数；0 表示不限制",
+        type=parse_size,
+        default=0,
+        help="JSON 最大大小，支持 B/KB/MB/GB/TB；0 表示不限制（默认不限制）",
+    )
+    preview_parser.add_argument(
+        "--json-record-probe-size",
+        type=parse_size,
+        default=DEFAULT_JSON_RECORD_PROBE_SIZE,
+        help="单条 JSON 记录探测窗口，支持 B/KB/MB/GB/TB",
     )
     _add_runtime_options(preview_parser)
 
@@ -177,9 +193,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     structure_parser.add_argument(
         "--max-json-size",
-        type=int,
-        default=DEFAULT_MAX_JSON_SIZE,
-        help="JSON 最大字节数；0 表示不限制",
+        type=parse_size,
+        default=0,
+        help="JSON 最大大小，支持 B/KB/MB/GB/TB；0 表示不限制（默认不限制）",
+    )
+    structure_parser.add_argument(
+        "--json-record-probe-size",
+        type=parse_size,
+        default=DEFAULT_JSON_RECORD_PROBE_SIZE,
+        help="单条 JSON 记录探测窗口，支持 B/KB/MB/GB/TB",
     )
     _add_runtime_options(structure_parser)
 
@@ -309,6 +331,7 @@ def _run(args: argparse.Namespace) -> int:
             profile,
             args.limit,
             max_size=args.max_json_size,
+            record_probe_size=args.json_record_probe_size,
         )
         if not previews:
             print("没有解析出可索引内容。")
@@ -326,6 +349,7 @@ def _run(args: argparse.Namespace) -> int:
             max_depth=args.max_depth,
             max_paths=args.max_paths,
             max_size=args.max_json_size,
+            record_probe_size=args.json_record_probe_size,
         )
         _print_json_structure(report)
         return 0
@@ -381,6 +405,7 @@ def _run(args: argparse.Namespace) -> int:
                 exclude_dirs=args.exclude_dirs,
                 max_files=args.max_files,
                 max_json_size=args.max_json_size,
+                json_record_probe_size=args.json_record_probe_size,
                 progress_callback=_print_index_progress,
             )
             _print_index_stats(stats)

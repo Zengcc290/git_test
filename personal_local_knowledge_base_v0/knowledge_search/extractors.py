@@ -15,6 +15,7 @@ from collections.abc import Iterator
 # 抽取结果统一使用这个数据模型传递给清洗和索引模块。
 from .json_parser import (
     DEFAULT_MAX_JSON_SIZE,
+    DEFAULT_JSON_RECORD_PROBE_SIZE,
     JsonProfile,
     iter_json_text,
 )
@@ -208,6 +209,7 @@ def iter_document_text(
     read_size: int = DEFAULT_READ_SIZE,
     json_profile: JsonProfile | None = None,
     max_json_size: int = DEFAULT_MAX_JSON_SIZE,
+    json_record_probe_size: int = DEFAULT_JSON_RECORD_PROBE_SIZE,
 ) -> Iterator[str]:
     """根据文档类型按块、按页或按幻灯片产生文本。"""
 
@@ -234,6 +236,7 @@ def iter_document_text(
             document.path,
             json_profile,
             max_size=max_json_size,
+            record_probe_size=json_record_probe_size,
         )
         return
 

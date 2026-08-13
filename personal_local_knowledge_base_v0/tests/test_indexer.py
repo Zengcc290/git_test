@@ -6,7 +6,7 @@ from pathlib import Path
 # 导入数据库和完整索引流水线。
 from knowledge_search.database import KnowledgeBase
 from knowledge_search.indexer import discover_files, index_paths
-from knowledge_search.json_parser import JsonProfile
+from knowledge_search.json_parser import JsonField, JsonProfile
 
 
 class IndexerTests(unittest.TestCase):
@@ -106,6 +106,47 @@ class IndexerTests(unittest.TestCase):
                 "indexed",
             ])
             self.assertEqual({event.total for event in events}, {2})
+
+    def test_large_json_record_is_chunked_without_merging_next_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_path = root / "large.json"
+            data_path.write_text(
+                '{"id":1,"title":"large","payload":"'
+                + ("x" * 300)
+                + '"}\n{"id":2,"title":"small","payload":"tail"}',
+                encoding="utf-8",
+            )
+            profile = JsonProfile(
+                name="large",
+                record_path="$",
+                index_mode="record",
+                fields=(JsonField(path="title"),),
+                separator="\n",
+                filters=(),
+                fingerprint="large",
+            )
+
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                stats = index_paths(
+                    knowledge_base,
+                    [data_path],
+                    json_profile=profile,
+                    chunk_size=80,
+                    overlap=10,
+                    json_record_probe_size=64,
+                )
+                rows = knowledge_base.connection.execute(
+                    "SELECT content FROM chunks ORDER BY chunk_index"
+                ).fetchall()
+
+            self.assertEqual(stats.indexed, 1)
+            self.assertGreater(len(rows), 2)
+            contents = [row["content"] for row in rows]
+            large_contents = [content for content in contents if '"large"' in content]
+            small_contents = [content for content in contents if content == "small"]
+            self.assertTrue(large_contents)
+            self.assertEqual(small_contents, ["small"])
 
     def test_indexes_txt_and_markdown_incrementally(self):
         # 测试 TXT、Markdown、增量跳过和空文件清理。
