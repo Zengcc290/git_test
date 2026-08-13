@@ -29,6 +29,9 @@ from .json_parser import (
 )
 from .logging_config import configure_logging
 from .models import IndexProgress
+from .rag.answer import RagAnswerer, RagConfig
+from .rag.llm_client import LLMClient
+from .rag.retriever import KeywordRetriever
 
 
 logger = logging.getLogger(__name__)
@@ -79,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 创建顶层解析器，子命令负责各自的业务参数。
     parser = argparse.ArgumentParser(
         prog="knowledge-search",
-        description="个人本地知识库搜索工具 V1：导入、管理文档并使用 SQLite FTS5 搜索。",
+        description="个人本地知识库搜索工具 V2：SQLite FTS5 搜索与基础 RAG 问答。",
     )
     # required=True 可以在用户忘记子命令时给出明确用法提示。
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -212,6 +215,29 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--no-color", action="store_true", help="不使用 ANSI 颜色，改用 [[...]] 标记")
     _add_runtime_options(search_parser)
 
+    ask_parser = subparsers.add_parser(
+        "ask",
+        help="检索相关文档片段并调用大模型生成带引用的答案",
+    )
+    ask_parser.add_argument("question", help="要基于本地知识库回答的问题")
+    ask_parser.add_argument(
+        "--rag-config",
+        type=Path,
+        help="RAG JSON 配置文件（默认自动读取 configs/rag.json）",
+    )
+    ask_parser.add_argument("--top-k", type=int, help="覆盖配置中的检索分段数")
+    ask_parser.add_argument(
+        "--max-context-chars",
+        type=int,
+        help="覆盖配置中的最大上下文字符数",
+    )
+    ask_parser.add_argument(
+        "--temperature",
+        type=float,
+        help="覆盖配置中的模型 temperature",
+    )
+    _add_runtime_options(ask_parser)
+
     # stats 只读取数据库统计信息，不执行索引或搜索。
     stats_parser = subparsers.add_parser("stats", help="查看数据库统计信息")
     _add_runtime_options(stats_parser)
@@ -320,6 +346,44 @@ def _print_json_structure(report) -> None:
         print(f"{entry.path} [{type_text}]，出现 {entry.count} 次")
 
 
+def _load_rag_config(args: argparse.Namespace) -> RagConfig:
+    config_path = args.rag_config
+    if config_path is None:
+        default_path = Path("configs/rag.json")
+        config = RagConfig.from_file(default_path) if default_path.exists() else RagConfig()
+    else:
+        config = RagConfig.from_file(config_path)
+
+    return RagConfig(
+        top_k=args.top_k if args.top_k is not None else config.top_k,
+        max_context_chars=(
+            args.max_context_chars
+            if args.max_context_chars is not None
+            else config.max_context_chars
+        ),
+        temperature=(
+            args.temperature if args.temperature is not None else config.temperature
+        ),
+    )
+
+
+def _print_answer(result) -> None:
+    print("答案：")
+    print(result.answer)
+    if result.sources:
+        print("\n引用来源：")
+        for source in result.sources:
+            print(f"{source.citation} ({source.file_type})")
+            print(f"    路径：{source.document_path}")
+    print(
+        "\n运行指标："
+        f"耗时 {result.elapsed_ms:.1f} ms；"
+        f"上下文 {result.context_chars} 字符；"
+        f"token {result.usage.total_tokens} "
+        f"(输入 {result.usage.prompt_tokens} / 输出 {result.usage.completion_tokens})"
+    )
+
+
 def _run(args: argparse.Namespace) -> int:
     # 先配置日志，再创建数据库连接，保证初始化错误也有记录。
     configure_logging(args.log_level, args.log_file)
@@ -418,6 +482,21 @@ def _run(args: argparse.Namespace) -> int:
             print(f"数据库：{knowledge_base.db_path}")
             print(f"文档数：{knowledge_base.document_count()}")
             print(f"分段数：{knowledge_base.chunk_count()}")
+            return 0
+
+        if args.command == "ask":
+            config = _load_rag_config(args)
+            retriever = KeywordRetriever(
+                knowledge_base,
+                top_k=config.top_k,
+                max_context_chars=config.max_context_chars,
+            )
+            answerer = RagAnswerer(
+                retriever,
+                temperature=config.temperature,
+                client_factory=LLMClient.from_env,
+            )
+            _print_answer(answerer.answer(args.question))
             return 0
 
         if args.command == "search":

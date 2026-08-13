@@ -9,6 +9,27 @@ from knowledge_search.models import Chunk, ExtractedDocument
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_chunk_window_returns_neighbors_from_same_document(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            document = ExtractedDocument(
+                path=(root / "note.md").resolve(),
+                file_type="md",
+                text="zero one two",
+                sha256="window-hash",
+                size=12,
+                modified_ns=1,
+            )
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                knowledge_base.replace_document(
+                    document,
+                    [Chunk(0, "zero"), Chunk(1, "one"), Chunk(2, "two")],
+                )
+                hit = knowledge_base.search("one")[0]
+                window = knowledge_base.chunk_window(hit.chunk_id)
+
+            self.assertEqual([chunk.index for chunk in window], [0, 1, 2])
+            self.assertEqual([chunk.content for chunk in window], ["zero", "one", "two"])
     def test_fts5_search_and_replace_document(self):
         # 每次测试创建独立的临时 SQLite 数据库。
         with tempfile.TemporaryDirectory() as temp_dir:

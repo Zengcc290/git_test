@@ -506,6 +506,39 @@ class KnowledgeBase:
             for row in rows
         ]
 
+    def chunk_window(self, chunk_id: int, radius: int = 1) -> list[Chunk]:
+        """Return neighboring chunks from the same document around a search hit."""
+
+        if radius < 0:
+            raise ValueError("radius 不能小于 0")
+        row = self.connection.execute(
+            "SELECT document_id, chunk_index FROM chunks WHERE id = ?",
+            (chunk_id,),
+        ).fetchone()
+        if row is None:
+            return []
+        rows = self.connection.execute(
+            """
+            SELECT chunk_index, content, start_offset
+            FROM chunks
+            WHERE document_id = ? AND chunk_index BETWEEN ? AND ?
+            ORDER BY chunk_index ASC
+            """,
+            (
+                int(row["document_id"]),
+                int(row["chunk_index"]) - radius,
+                int(row["chunk_index"]) + radius,
+            ),
+        ).fetchall()
+        return [
+            Chunk(
+                index=int(item["chunk_index"]),
+                content=item["content"],
+                start_offset=int(item["start_offset"]),
+            )
+            for item in rows
+        ]
+
     def document_count(self) -> int:
         # 统计文档表中的源文件数量。
         row = self.connection.execute("SELECT COUNT(*) AS count FROM documents").fetchone()

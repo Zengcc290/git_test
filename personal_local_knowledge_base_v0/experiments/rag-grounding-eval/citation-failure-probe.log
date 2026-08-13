@@ -1,0 +1,6 @@
+2026-08-13 19:32:24,395 | DEBUG | jieba | Building prefix dict from the default dictionary ...
+2026-08-13 19:32:24,396 | DEBUG | jieba | Loading model from cache C:\Users\liang\AppData\Local\Temp\jieba.cache
+2026-08-13 19:32:24,795 | DEBUG | jieba | Loading model cost 0.399 seconds.
+2026-08-13 19:32:24,795 | DEBUG | jieba | Prefix dict has been built successfully.
+2026-08-13 19:32:24,840 | ERROR | knowledge_search.rag.answer | RAG_RECORD {"event": "rag_error", "question": "项目代号是什么？", "retrieval_results": [{"citation_id": 1, "chunk_id": 1, "path": "C:\\Users\\liang\\AppData\\Local\\Temp\\tmpa4qf496_\\[REDACTED].md", "filename": "[REDACTED].md", "chunk_index": 0, "chunk_indexes": [0], "score": -2e-06, "content": "[分段 0]\n项目代号是晨星。"}], "answer": null, "elapsed_ms": 454.595, "token_usage": {"prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26}, "error_type": "CitationValidationError", "error": "大模型回答引用校验失败：非拒答答案没有提供 [n] 格式的引用。本次回答未被接受，请重试。"}
+2026-08-13 19:32:24,841 | ERROR | knowledge_search.cli | 命令执行失败：大模型回答引用校验失败：非拒答答案没有提供 [n] 格式的引用。本次回答未被接受，请重试。

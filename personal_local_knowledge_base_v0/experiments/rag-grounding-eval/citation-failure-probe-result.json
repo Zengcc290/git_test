@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "cli_exit_code": 1,
+  "rag_error_present": true,
+  "rag_answer_absent": true,
+  "citation_error_present": true,
+  "token_usage_preserved": true,
+  "api_key_redacted": true
+}

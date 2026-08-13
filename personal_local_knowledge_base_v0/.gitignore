@@ -1,8 +1,13 @@
 .venv/
+.env
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
 .pytest_cache/
 data/*.db
 data/*.db-*
 logs/*.log
+!/experiments/rag-grounding-eval/citation-validated-eval-20260813.log
+!/experiments/rag-grounding-eval/citation-failure-probe.log
 sample_documents/

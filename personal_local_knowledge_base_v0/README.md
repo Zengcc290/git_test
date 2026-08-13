@@ -1,6 +1,6 @@
-# 个人本地知识库搜索工具 V1
+# 个人本地知识库搜索工具 V2
 
-这是一个不带聊天机器人的本地文档搜索引擎。它把 `.txt`、`.md`、PDF、`.pptx` 和配置化 `.json` 内容导入 SQLite，清洗并分段后使用 SQLite FTS5 做关键词搜索，命令行返回带高亮的上下文。
+这是一个本地文档搜索和基础 RAG 问答工具。它把 `.txt`、`.md`、PDF、`.pptx` 和配置化 `.json` 内容导入 SQLite，使用 SQLite FTS5 检索相关分段，再把有长度限制的上下文交给 OpenAI 兼容的大模型生成带引用的答案。
 
 ## 功能
 
@@ -14,6 +14,9 @@
 - 目录排除规则、最大文件数限制和超大 JSON 大小保护
 - 索引过程中显示当前文件和总进度
 - 命令行查询、结果排序、路径/分段信息和命中高亮
+- 基于现有 FTS5 的 Top-K 关键词 RAG 问答
+- 严格上下文 Prompt、无资料拒答、文件与分段引用
+- OpenAI 兼容 API、响应时间及 token 使用量记录
 - 控制台日志、文件日志、单文件异常隔离
 - Python `unittest` 回归测试，覆盖正式索引链路和 JSON 流式解析
 - 实验过程记录见 [`docs/experiment-log.md`](docs/experiment-log.md)
@@ -57,6 +60,29 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m knowledge_search search 本地 --limit 5 --no-color
 ```
 
+复制示例文件并在项目根目录创建 `.env`：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+编辑 `.env`：
+
+```dotenv
+LLM_API_KEY=你的密钥
+LLM_BASE_URL=https://api.example.com/v1
+LLM_MODEL=模型名称
+```
+
+然后直接进行文档问答：
+
+```powershell
+
+.\.venv\Scripts\python.exe -m knowledge_search ask "SQLite FTS5 是什么？"
+```
+
+程序会自动读取当前项目的 `.env`。已有的系统环境变量优先级更高，不会被 `.env` 覆盖。`.env` 已加入 Git 忽略规则，只提交不含真实密钥的 [`.env.example`](.env.example)。`LLM_BASE_URL` 填 OpenAI 兼容 API 的版本根地址（通常以 `/v1` 结尾），程序会调用其 `/chat/completions`；也可以直接填写完整的 `/chat/completions` 地址。三个大模型参数不会写入普通 RAG 配置或日志。
+
 不加 `--no-color` 时，终端使用 ANSI 黄色高亮；`--no-color` 会使用 `[[命中词]]` 标记，方便重定向和查看日志。
 
 查看统计信息：
@@ -87,7 +113,9 @@ knowledge_search/       核心 Python 包
   chunking.py            文本分段
   database.py            SQLite 与 FTS5
   indexer.py             文件发现和增量索引
+  rag/                    检索、Prompt、模型客户端和回答编排
   cli.py                 命令行入口
+configs/rag.json         不含密钥的 RAG 配置
 sample_documents/        可直接运行的示例文档
 data/                    数据库目录（数据库文件被 git 忽略）
 docs/experiment-log.md   实验记录
@@ -170,6 +198,68 @@ V1 增加了可管理、可验证的知识库操作。所有命令都可以追�
 
 `check-db` 在健康数据库返回 0；发现孤立 chunks、FTS5 数量或 rowid 不一致、缺失 token 行、无分段文档时返回 1 并打印诊断信息。
 
-## V1 范围与限制
+## V2 基础 RAG 问答
 
-V0 只做关键词搜索，不做问答、对话、Embedding、向量数据库和远程 API。PDF 仅支持有文本层的文件，扫描版 PDF 暂不做 OCR；PPTX 目前抽取幻灯片文本框、标题、表格和组合图形文字，不处理图片中的文字、图表内部文字或演讲者备注。JSON 解析支持 JSON Lines 和顶层数组的逐条流式读取；超过探测窗口的单条记录会按原始记录边界分块进入索引，但 `json-preview`/`json-structure` 仍要求记录可以完整解析。jieba 词索引会增加首次建库时间和少量磁盘占用，但可以减少中文查询对低相关 `LIKE` 结果的依赖。
+`ask` 复用 V1 的 SQLite FTS5 检索，不使用向量数据库或 Agent。默认读取 [`configs/rag.json`](configs/rag.json)：
+
+```json
+{
+  "top_k": 5,
+  "max_context_chars": 12000,
+  "temperature": 0
+}
+```
+
+可使用另一份非敏感配置，或为单次命令覆盖参数：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_search ask "如何使用 FTS5？" `
+  --rag-config .\configs\rag.json `
+  --top-k 3 --max-context-chars 8000 --temperature 0
+```
+
+命令输出答案、引用文件、分段编号、响应时间、上下文字符数和 API 返回的 token 使用量。完整的问题、检索来源、回答、耗时和 token 指标以 `RAG_RECORD` JSON 记录到日志；日志不会记录 API Key、请求头或模型服务地址。无匹配分段时程序不会调用大模型，并直接输出“根据当前知识库资料，无法回答该问题。”；API 配置缺失、网络异常、HTTP 错误或响应格式异常会返回简明错误和非零状态。
+
+Prompt 明确要求模型只依据检索上下文回答，把文档片段视为不可信数据，并要求逐句使用 `[1]`、`[2]` 引用。正式回答链路还会强制校验模型文本：非拒答答案必须至少包含一个属于本次检索结果的 `[n]`，只要出现任一不存在的引用（包括合法与非法引用混合）就整次失败。无引用或错误引用不会被自动补写、不会修改模型原文，也不会记录成 `rag_answer`；CLI 返回非零状态并写入脱敏的 `rag_error`，其中保留已产生的响应时间和 token 使用量。拒答答案可以不带引用，但若带了非法引用同样失败。
+
+CLI 会独立列出实际传给模型的来源，便于人工核对。10 条实际问答和逐事实验收结果见 [`docs/v2-qa-samples.md`](docs/v2-qa-samples.md)。
+
+可用本地假模型端到端复现“无引用答案必须失败”，不消耗真实模型额度：
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.probe_citation_failure `
+  --log-output experiments\rag-grounding-eval\citation-failure-probe.log `
+  --result-output experiments\rag-grounding-eval\citation-failure-probe-result.json
+```
+
+探针会启动真实 `ask` 子进程，并断言退出码为 1、日志只有 `rag_error` 而没有 `rag_answer`、token 用量得到保留、API Key 已脱敏。
+
+大语料 grounding 评估可复现运行（先确保两份受控记录已索引）：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_search index `
+  experiments\rag-grounding-eval\controlled-facts.md `
+  experiments\rag-grounding-eval\controlled-facts-secondary.md `
+  --db data\knowledge.db
+
+.\.venv\Scripts\python.exe -m scripts.run_rag_eval `
+  experiments\rag-grounding-eval\eval-cases.json `
+  --db data\knowledge.db `
+  --log-file experiments\rag-grounding-eval\citation-validated-eval-20260813.log
+
+.\.venv\Scripts\python.exe scripts\clean_rag_log.py `
+  experiments\rag-grounding-eval\citation-validated-eval-20260813.log `
+  experiments\rag-grounding-eval\eval-cases.json `
+  --db data\knowledge.db `
+  --ablation-result experiments\rag-grounding-eval\ablation-no-context-result.json `
+  --jsonl-output experiments\rag-grounding-eval\citation-validated-cleaned.jsonl `
+  --report-output experiments\rag-grounding-eval\citation-validated-cleaned-report.md
+```
+
+固定评估运行器每次会覆盖指定日志，避免混入旧记录；清洗后若任一用例不通过，清洗命令返回非零状态。
+
+本次评估使用 16,901 篇文档、29,522 个分段，包含 THUCNews 真实新闻细节、两组随机受控事实、资料缺失拒答和跨文档引用。清洗报告见 [`experiments/rag-grounding-eval/citation-validated-cleaned-report.md`](experiments/rag-grounding-eval/citation-validated-cleaned-report.md)，固定用例见 [`eval-cases.json`](experiments/rag-grounding-eval/eval-cases.json)：10/10 条通过，55/55 个事实同时出现在模型答案和答案实际引用的分段中。不提供检索上下文的消融脚本见 [`ablation_no_context.py`](experiments/rag-grounding-eval/ablation_no_context.py)：同一模型对第一组随机事实回答“不知道”，而带 RAG 时精确回答 8/8。
+
+## 当前范围与限制
+
+V2 第一阶段只做无会话的关键词 RAG，不做 Agent、Embedding、向量数据库、重排模型、流式输出或复杂前端。程序能保证回答至少引用本次检索来源且不含越界引用，但引用格式合法不等于每句话在语义上都被来源支持，因此仍需结合逐事实评估检查幻觉。PDF 仅支持有文本层的文件，扫描版 PDF 暂不做 OCR；PPTX 目前抽取幻灯片文本框、标题、表格和组合图形文字，不处理图片中的文字、图表内部文字或演讲者备注。

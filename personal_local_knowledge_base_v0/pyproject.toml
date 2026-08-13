@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personal-local-knowledge-base-v0"
-version = "0.1.0"
-description = "A local text, Markdown, PDF and PPTX search engine backed by SQLite FTS5."
+version = "0.2.0"
+description = "A local SQLite FTS5 knowledge base with keyword RAG question answering."
 requires-python = ">=3.10"
 dependencies = [
     "pypdf>=5.0,<7.0",
     "python-pptx>=1.0,<2.0",
     "jieba>=0.42,<1.0",
+    "python-dotenv>=1.0,<2.0",
 ]
 
 [tool.setuptools.packages.find]

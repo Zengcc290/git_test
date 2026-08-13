@@ -1,0 +1,147 @@
+[
+  {
+    "id": "controlled_unknown_facts",
+    "kind": "随机受控事实",
+    "question": "雾港棱镜项目的内部识别码、封存日期和地点、封存口令、冷却液目标温度、传感器校准序列、二级断电应急通道及最终状态分别是什么？",
+    "expected_source": "controlled-facts.md",
+    "expected_refused": false,
+    "facts": [
+      {"label": "内部识别码", "answer_any": ["VH-7Q29-K"], "evidence_any": ["VH-7Q29-K"]},
+      {"label": "封存日期", "answer_any": ["2041年11月3日"], "evidence_any": ["2041年11月3日"]},
+      {"label": "封存地点", "answer_any": ["北穹仓"], "evidence_any": ["北穹仓"]},
+      {"label": "封存口令", "answer_any": ["蓝铜四十三"], "evidence_any": ["蓝铜四十三"]},
+      {"label": "冷却液温度", "answer_any": ["17.6摄氏度"], "evidence_any": ["17.6摄氏度"]},
+      {"label": "校准序列", "answer_any": ["31、8、44"], "evidence_any": ["31、8、44"]},
+      {"label": "应急通道", "answer_any": ["琥珀桥"], "evidence_any": ["琥珀桥"]},
+      {"label": "最终状态", "answer_any": ["琉璃级"], "evidence_any": ["琉璃级"]}
+    ]
+  },
+  {
+    "id": "thucnews_shanghai_injuries",
+    "kind": "真实新闻细节",
+    "question": "邓华德用哪个词总结上海队那个赛季？按他的统计，32场中人员齐整和有伤病的比赛各多少场、各赢多少场？",
+    "expected_source": "10820.txt",
+    "expected_refused": false,
+    "facts": [
+      {"label": "总结词", "answer_any": ["医生"], "evidence_any": ["医生"]},
+      {"label": "人员齐整场次", "answer_any": ["12场"], "evidence_any": ["12场"]},
+      {"label": "人员齐整胜场", "answer_any": ["赢了8场"], "evidence_any": ["赢了8场"]},
+      {"label": "伤病场次", "answer_any": ["20场"], "evidence_any": ["20场"]},
+      {"label": "伤病胜场", "answer_any": ["赢了4场"], "evidence_any": ["赢了4场"]}
+    ]
+  },
+  {
+    "id": "thucnews_qatar_iran",
+    "kind": "真实新闻跨分段细节",
+    "question": "报道中卡塔尔男篮对伊朗只打了多久、最终比分是多少、为何比赛提前结束，伊朗队赛后又做了什么？",
+    "expected_source": "107967.txt",
+    "expected_refused": false,
+    "facts": [
+      {"label": "比赛时长", "answer_any": ["7分42秒"], "evidence_any": ["7分42秒"]},
+      {"label": "最终比分", "answer_any": ["4比40", "4：40", "4-40"], "evidence_any": ["4比40", "4：40", "4-40"]},
+      {"label": "终止原因", "answer_any": ["只剩一名球员", "只剩下一名球员", "场上只剩一人"], "evidence_any": ["只剩一名球员", "只剩下一名球员"]},
+      {"label": "规则终止", "answer_any": ["国际篮联规则"], "evidence_any": ["国际篮联规则"]},
+      {"label": "赛后训练", "answer_any": ["留在场上继续训练", "场上继续训练"], "evidence_any": ["场上练球", "场上继续训练"]},
+      {"label": "离场时间", "answer_any": ["开打前半小时", "比赛开始前半小时", "半小时开场", "开场前半小时"], "evidence_any": ["还有半小时开打", "开打前半小时"]}
+    ]
+  },
+  {
+    "id": "thucnews_xinjiang_players",
+    "kind": "真实新闻细节",
+    "question": "宿茂臻国青选拔队参加秦皇岛集训的新疆球员是谁？谁是维族球员，他与朝鲜三战的出场和进球情况如何？",
+    "expected_source": "113225.txt",
+    "expected_refused": false,
+    "facts": [
+      {"label": "守门员", "answer_any": ["滕尚坤"], "evidence_any": ["滕尚坤"]},
+      {"label": "后腰", "answer_any": ["买提"], "evidence_any": ["买提"]},
+      {"label": "前卫", "answer_any": ["文烁"], "evidence_any": ["文烁"]},
+      {"label": "维族身份", "answer_any": ["买提是维族球员"], "evidence_any": ["买提是维族球员"]},
+      {"label": "首发次数", "answer_any": ["两次首发"], "evidence_any": ["两次首发"]},
+      {"label": "进球场次", "answer_any": ["最后一场", "第三场"], "evidence_any": ["最后一战"]},
+      {"label": "进球方式", "answer_any": ["点球"], "evidence_any": ["点球"]},
+      {"label": "进球数", "answer_any": ["攻入一球", "打进一球"], "evidence_any": ["攻入一球"]}
+    ]
+  },
+  {
+    "id": "controlled_missing_facts",
+    "kind": "资料缺失拒答",
+    "question": "雾港棱镜项目的主控芯片型号、项目预算和负责人姓名分别是什么？",
+    "expected_source": "controlled-facts.md",
+    "expected_refused": true,
+    "facts": [
+      {"label": "明确资料未提供", "answer_any": ["记录未提供", "记录中未提供", "资料未提供"], "evidence_any": ["记录中没有给出"]},
+      {"label": "主控芯片型号", "answer_any": ["主控芯片型号"], "evidence_any": ["主控芯片型号"]},
+      {"label": "项目预算", "answer_any": ["项目预算"], "evidence_any": ["项目预算"]},
+      {"label": "负责人姓名", "answer_any": ["负责人姓名"], "evidence_any": ["负责人姓名"]}
+    ]
+  },
+  {
+    "id": "controlled_secondary_facts",
+    "kind": "随机受控事实（二）",
+    "question": "星潮罗盘项目的内部批次号、验收日期和地点、验收暗语、基准压力、光学阵列校准顺序以及最终封存等级分别是什么？",
+    "expected_source": "controlled-facts-secondary.md",
+    "expected_refused": false,
+    "facts": [
+      {"label": "内部批次号", "answer_any": ["SC-4M71-P"], "evidence_any": ["SC-4M71-P"]},
+      {"label": "验收日期", "answer_any": ["2043年6月19日", "2043 年 6 月 19 日"], "evidence_any": ["2043 年 6 月 19 日"]},
+      {"label": "验收地点", "answer_any": ["南汐库"], "evidence_any": ["南汐库"]},
+      {"label": "验收暗语", "answer_any": ["银杉二十六"], "evidence_any": ["银杉二十六"]},
+      {"label": "基准压力", "answer_any": ["8.35兆帕", "8.35 兆帕"], "evidence_any": ["8.35 兆帕"]},
+      {"label": "校准顺序", "answer_any": ["12、57、6"], "evidence_any": ["12、57、6"]},
+      {"label": "封存等级", "answer_any": ["青晶级"], "evidence_any": ["青晶级"]}
+    ]
+  },
+  {
+    "id": "thucnews_villa_long_shot",
+    "kind": "自然问题新闻细节",
+    "question": "比利亚在对智利的比赛中从多远吊射破门？此前阿里汉的纪录是多少米，这一世界杯最远吊射纪录是否已经获得国际足联确认？",
+    "expected_source": "110379.txt",
+    "expected_refused": false,
+    "facts": [
+      {"label": "比利亚距离", "answer_any": ["45米", "45 米"], "evidence_any": ["45米"]},
+      {"label": "阿里汉距离", "answer_any": ["40米", "40 米"], "evidence_any": ["40米"]},
+      {"label": "尚未确认", "answer_any": ["有待", "尚待", "尚未"], "evidence_any": ["有待于国际足联认定"]},
+      {"label": "认定机构", "answer_any": ["国际足联"], "evidence_any": ["国际足联"]}
+    ]
+  },
+  {
+    "id": "thucnews_wizards_road_loss",
+    "kind": "自然问题新闻细节",
+    "question": "华盛顿奇才以多少比分输给夏洛特山猫、客场连续第几场不胜？杰拉德-亨德森得了多少分、投篮命中情况怎样？",
+    "expected_source": "102094.txt",
+    "expected_refused": false,
+    "facts": [
+      {"label": "比赛比分", "answer_any": ["89-104", "89比104", "89：104"], "evidence_any": ["89-104"]},
+      {"label": "客场不胜", "answer_any": ["第18场", "18场"], "evidence_any": ["第18场"]},
+      {"label": "亨德森得分", "answer_any": ["19分"], "evidence_any": ["19分"]},
+      {"label": "投篮命中", "answer_any": ["11投8中"], "evidence_any": ["11投8中"]}
+    ]
+  },
+  {
+    "id": "thucnews_macedonia_slovenia",
+    "kind": "自然问题新闻细节",
+    "question": "马其顿在欧锦赛以多少比分战胜斯洛文尼亚？麦卡勒布身高和场上位置是什么，斯洛文尼亚唯一得分上双的球员是谁、得到多少分？",
+    "expected_source": "107852.txt",
+    "expected_refused": false,
+    "facts": [
+      {"label": "比赛比分", "answer_any": ["68-59", "68比59", "68：59"], "evidence_any": ["68-59"]},
+      {"label": "麦卡勒布身高", "answer_any": ["1.78米", "1.78 米"], "evidence_any": ["1.78米"]},
+      {"label": "麦卡勒布位置", "answer_any": ["组织后卫"], "evidence_any": ["组织后卫"]},
+      {"label": "得分上双球员", "answer_any": ["戈兰-德拉季奇", "戈兰·德拉季奇"], "evidence_any": ["戈兰-德拉季奇"]},
+      {"label": "德拉季奇得分", "answer_any": ["20分"], "evidence_any": ["20分"]}
+    ]
+  },
+  {
+    "id": "controlled_cross_document",
+    "kind": "多文档引用",
+    "question": "请根据两份项目记录分别回答：雾港棱镜项目的内部识别码和封存口令是什么；星潮罗盘项目的内部批次号和验收暗语是什么？",
+    "expected_sources": ["controlled-facts.md", "controlled-facts-secondary.md"],
+    "expected_refused": false,
+    "facts": [
+      {"label": "雾港识别码", "answer_any": ["VH-7Q29-K"], "evidence_any": ["VH-7Q29-K"]},
+      {"label": "雾港口令", "answer_any": ["蓝铜四十三"], "evidence_any": ["蓝铜四十三"]},
+      {"label": "星潮批次号", "answer_any": ["SC-4M71-P"], "evidence_any": ["SC-4M71-P"]},
+      {"label": "星潮暗语", "answer_any": ["银杉二十六"], "evidence_any": ["银杉二十六"]}
+    ]
+  }
+]
