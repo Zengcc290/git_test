@@ -8,6 +8,7 @@ __pycache__/
 data/*.db
 data/*.db-*
 logs/*.log
+uploads/
 !/experiments/rag-grounding-eval/citation-validated-eval-20260813.log
 !/experiments/rag-grounding-eval/citation-failure-probe.log
 sample_documents/

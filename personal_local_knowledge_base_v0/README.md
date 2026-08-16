@@ -1,6 +1,29 @@
-# 个人本地知识库搜索工具 V2
+# 个人本地知识库搜索工具 V3
 
 这是一个本地文档搜索和基础 RAG 问答工具。它把 `.txt`、`.md`、PDF、`.pptx` 和配置化 `.json` 内容导入 SQLite，使用 SQLite FTS5 检索相关分段，再把有长度限制的上下文交给 OpenAI 兼容的大模型生成带引用的答案。
+
+## V3 网页界面
+
+V3 在现有 FTS5 + RAG 链路上增加了无需第三方 Web 框架的本地网页服务。先安装依赖，再启动：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_search web
+```
+
+浏览器打开 <http://127.0.0.1:8000/>。页面包含搜索、问答、导入和文档管理四个视图：
+
+- 搜索：关键词检索、FTS5 排序和命中高亮。
+- 问答：复用关键词 RAG，展示答案、耗时、token 和实际引用来源；无资料时拒答。
+- 导入：上传 TXT/Markdown/PDF/PPTX/JSON，或提交本机目录批量索引。
+- 文档：查看元数据并删除文档及其 FTS5 分段。
+
+网页默认监听 `127.0.0.1:8000`，可以通过 `--db`、`--host`、`--port` 和 `--upload-dir` 调整。上传服务限制文件类型、文件名路径、请求体和 512 MiB 文件大小；API 错误会以 JSON 返回，LLM API Key 会脱敏。
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_search web --port 9000 --db .\data\knowledge.db --upload-dir .\uploads
+```
+
+浏览器到 API 再到 SQLite/RAG 的数据流、逐模块代码讲解见 [`docs/v3-code-walkthrough.md`](docs/v3-code-walkthrough.md)，十条网页问答验收记录见 [`docs/v3-web-acceptance.md`](docs/v3-web-acceptance.md)。
 
 ## 功能
 
@@ -262,4 +285,4 @@ CLI 会独立列出实际传给模型的来源，便于人工核对。10 条实�
 
 ## 当前范围与限制
 
-V2 第一阶段只做无会话的关键词 RAG，不做 Agent、Embedding、向量数据库、重排模型、流式输出或复杂前端。程序能保证回答至少引用本次检索来源且不含越界引用，但引用格式合法不等于每句话在语义上都被来源支持，因此仍需结合逐事实评估检查幻觉。PDF 仅支持有文本层的文件，扫描版 PDF 暂不做 OCR；PPTX 目前抽取幻灯片文本框、标题、表格和组合图形文字，不处理图片中的文字、图表内部文字或演讲者备注。
+V3 仍是无会话的关键词 RAG，不做 Agent、Embedding、向量数据库、重排模型或流式输出。程序能保证回答至少引用本次检索来源且不含越界引用，但引用格式合法不等于每句话在语义上都被来源支持，因此仍需结合逐事实评估检查幻觉。PDF 仅支持有文本层的文件，扫描版 PDF 暂不做 OCR；PPTX 目前抽取幻灯片文本框、标题、表格和组合图形文字，不处理图片中的文字、图表内部文字或演讲者备注。Embedding、混合检索和召回率对比留到 V4。

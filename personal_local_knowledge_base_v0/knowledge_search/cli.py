@@ -32,6 +32,7 @@ from .models import IndexProgress
 from .rag.answer import RagAnswerer, RagConfig
 from .rag.llm_client import LLMClient
 from .rag.retriever import KeywordRetriever
+from .web.app import run_web
 
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,23 @@ def build_parser() -> argparse.ArgumentParser:
         "check-db", help="检查数据库和 FTS5 索引健康状态"
     )
     _add_runtime_options(check_parser)
+
+    web_parser = subparsers.add_parser(
+        "web", help="启动本地网页界面（搜索、问答、导入和管理）"
+    )
+    web_parser.add_argument(
+        "--host", default="127.0.0.1", help="监听地址（默认：127.0.0.1）"
+    )
+    web_parser.add_argument(
+        "--port", type=int, default=8000, help="监听端口（默认：8000）"
+    )
+    web_parser.add_argument(
+        "--upload-dir",
+        type=Path,
+        default=Path("uploads"),
+        help="上传文件保存目录（默认：uploads）",
+    )
+    _add_runtime_options(web_parser)
     return parser
 
 
@@ -416,6 +434,15 @@ def _run(args: argparse.Namespace) -> int:
             record_probe_size=args.json_record_probe_size,
         )
         _print_json_structure(report)
+        return 0
+
+    if args.command == "web":
+        run_web(
+            db_path=args.db,
+            host=args.host,
+            port=args.port,
+            upload_dir=args.upload_dir,
+        )
         return 0
 
     # with 负责在任何子命令结束后关闭 SQLite 连接。

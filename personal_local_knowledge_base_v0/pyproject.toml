@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "personal-local-knowledge-base-v0"
-version = "0.2.0"
-description = "A local SQLite FTS5 knowledge base with keyword RAG question answering."
+version = "0.3.0"
+description = "A local SQLite FTS5 knowledge base with keyword RAG and a built-in web interface."
 requires-python = ">=3.10"
 dependencies = [
     "pypdf>=5.0,<7.0",
@@ -16,3 +16,6 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["knowledge_search*"]
+
+[tool.setuptools.package-data]
+"knowledge_search.web" = ["static/*"]
