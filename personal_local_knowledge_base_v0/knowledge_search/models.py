@@ -22,6 +22,34 @@ class ExtractedDocument:
     modified_ns: int
     # 解析配置指纹；普通文档为空，JSON 配置变化时用于触发重新索引。
     parser_fingerprint: str = ""
+    # 实际结构解析器；代码语法错误时记录 fallback-line。
+    parser: str = ""
+
+
+@dataclass(frozen=True)
+class DocumentBlock:
+    """文件抽取与正式长度分块之间的统一结构块。"""
+
+    block_id: str
+    path: str
+    block_type: str
+    language: str | None
+    heading_path: tuple[str, ...]
+    symbol_path: tuple[str, ...]
+    content: str
+    start_line: int | None
+    end_line: int | None
+    page_number: int | None
+    hard_boundary_before: bool
+    hard_boundary_after: bool
+    record_path: str | None = None
+    slide_number: int | None = None
+    shape_index: int | None = None
+    module_name: str | None = None
+    parameters: tuple[str, ...] = ()
+    docstring: str | None = None
+    comments: tuple[str, ...] = ()
+    parser: str = ""
 
 
 @dataclass(frozen=True)
@@ -34,11 +62,35 @@ class Chunk:
     content: str
     # 分段在原文中的起始偏移；V0 暂时保留字段，默认值为 0。
     start_offset: int = 0
+    embedding_content: str | None = None
+    block_id: str = ""
+    block_type: str = "text"
+    language: str | None = None
+    heading_path: tuple[str, ...] = ()
+    symbol_path: tuple[str, ...] = ()
+    start_line: int | None = None
+    end_line: int | None = None
+    page_number: int | None = None
+    record_path: str | None = None
+    slide_number: int | None = None
+    shape_index: int | None = None
+    module_name: str | None = None
+    parameters: tuple[str, ...] = ()
+    docstring: str | None = None
+    comments: tuple[str, ...] = ()
+    hard_boundary_before: bool = False
+    hard_boundary_after: bool = False
+    # 仅在索引流水线中短暂携带；数据库会写入独立 embeddings 表。
+    embedding_vector: tuple[float, ...] | None = None
+
+    @property
+    def canonical_content(self) -> str:
+        return self.content
 
 
 @dataclass(frozen=True)
 class SearchResult:
-    """一条搜索命中。score 使用 SQLite FTS5 的 bm25 分数。"""
+    """A search hit; BM25 is lower-better, vector similarity is higher-better."""
 
     # SQLite chunks 表中的分段主键。
     chunk_id: int
@@ -56,6 +108,24 @@ class SearchResult:
     score: float
     # 使用 HTML-like mark 标签处理后的文本，供程序或测试使用。
     highlighted_content: str
+    embedding_content: str = ""
+    block_id: str = ""
+    block_type: str = "text"
+    language: str | None = None
+    heading_path: tuple[str, ...] = ()
+    symbol_path: tuple[str, ...] = ()
+    start_line: int | None = None
+    end_line: int | None = None
+    page_number: int | None = None
+    record_path: str | None = None
+    slide_number: int | None = None
+    shape_index: int | None = None
+    module_name: str | None = None
+    parameters: tuple[str, ...] = ()
+    docstring: str | None = None
+    comments: tuple[str, ...] = ()
+    hard_boundary_before: bool = False
+    hard_boundary_after: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,6 +139,8 @@ class DocumentInfo:
     size: int
     chunk_count: int
     indexed_at: str
+    parser: str = ""
+    chunker_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -80,6 +152,7 @@ class DatabaseHealth:
     chunks_fts_count: int
     chunk_tokens_count: int
     chunks_fts_jieba_count: int
+    chunks_embedding_fts_count: int = 0
     issues: tuple[str, ...] = ()
 
     @property
@@ -115,3 +188,5 @@ class IndexStats:
     failed: int = 0
     # 因超过 JSON 大小上限而拒绝处理的文件数量。
     oversized: int = 0
+    # 新生成或因缓存失效而重建的向量数量。
+    embeddings_generated: int = 0

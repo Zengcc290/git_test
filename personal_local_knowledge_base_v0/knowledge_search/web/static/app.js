@@ -102,6 +102,7 @@ function renderSearch(results) {
         <span class="badge">${escapeHtml(result.file_type)}</span>
         <span class="result-meta">分段 ${result.chunk_index} · score ${Number(result.score).toFixed(3)}</span>
       </div>
+      ${result.location ? `<div class="src-path">${escapeHtml(result.location)}</div>` : ""}
       <div class="result-content">${highlightedContent(result.highlighted)}</div>
     </article>
   `).join("");
@@ -155,6 +156,7 @@ function renderAnswer(data) {
           <span class="cite">[${source.citation_id}]</span>
           <div class="src-info">
             <div class="src-name">${escapeHtml(source.filename)} · 分段 ${source.chunk_indexes.join("、")}</div>
+            ${source.location ? `<div class="src-path">${escapeHtml(source.location)}</div>` : ""}
             <div class="src-path">${escapeHtml(source.path)}</div>
           </div>
         </div>`).join("")}</div>`
@@ -283,5 +285,4 @@ $$(".tab").forEach((tab) => {
 });
 
 loadStats();
-
 

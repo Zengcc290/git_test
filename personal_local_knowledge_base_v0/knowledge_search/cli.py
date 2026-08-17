@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 # logging 用于记录命令执行过程中的错误。
 import logging
+import os
 # sqlite3.Error 用于捕获数据库层异常并转换为 CLI 失败状态。
 import sqlite3
 # sys 用于调整 Windows 控制台的标准输出编码。
@@ -17,6 +18,7 @@ from typing import Sequence
 
 # CLI 只负责参数和输出，具体能力由下层模块完成。
 from .database import KnowledgeBase
+from .embedding import EmbeddingSettings, RemoteQwen3EmbeddingModel
 from .highlighting import highlight_text
 from .indexer import index_paths
 from .json_parser import (
@@ -31,7 +33,8 @@ from .logging_config import configure_logging
 from .models import IndexProgress
 from .rag.answer import RagAnswerer, RagConfig
 from .rag.llm_client import LLMClient
-from .rag.retriever import KeywordRetriever
+from .rag.retriever import KeywordRetriever, VectorRetriever
+from .vector_search import NumpyVectorIndex
 from .web.app import run_web
 
 
@@ -63,14 +66,12 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
         default=Path("data/knowledge.db"),
         help="SQLite 数据库路径（默认：data/knowledge.db）",
     )
-    
     parser.add_argument(
         "--log-file",
         type=Path,
         default=Path("logs/app.log"),
         help="日志文件路径（默认：logs/app.log）",
     )
-
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -79,11 +80,52 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_embedding_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--embedding-base-url",
+        default=None,
+        help="SSH 转发后的 OpenAI/vLLM 兼容服务地址",
+    )
+    parser.add_argument(
+        "--embedding-revision",
+        help="固定的 Hugging Face commit hash；省略时从已加载模型解析",
+    )
+    parser.add_argument(
+        "--embedding-protocol",
+        choices=("auto", "openai", "simple"),
+        default="auto",
+        help="远端接口协议；默认从 OpenAPI 自动探测",
+    )
+    parser.add_argument("--embedding-dimension", type=int, default=1024)
+    parser.add_argument("--embedding-batch-size", type=int, default=8)
+    parser.add_argument("--embedding-timeout", type=float, default=120.0)
+
+
+def _embedding_backend(args) -> RemoteQwen3EmbeddingModel:
+    LLMClient.load_dotenv()
+    return RemoteQwen3EmbeddingModel(
+        EmbeddingSettings(
+            model_revision=(
+                args.embedding_revision
+                or os.getenv("EMBEDDING_MODEL_REVISION")
+            ),
+            dimension=args.embedding_dimension,
+            batch_size=args.embedding_batch_size,
+        ),
+        base_url=(
+            args.embedding_base_url
+            or os.getenv("EMBEDDING_BASE_URL", "http://127.0.0.1:8000")
+        ),
+        timeout=args.embedding_timeout,
+        protocol=args.embedding_protocol,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     # 创建顶层解析器，子命令负责各自的业务参数。
     parser = argparse.ArgumentParser(
         prog="knowledge-search",
-        description="个人本地知识库搜索工具 V2：SQLite FTS5 搜索与基础 RAG 问答。",
+        description="个人本地知识库搜索工具 V4：结构化索引、FTS5 搜索与基础 RAG 问答。",
     )
     # required=True 可以在用户忘记子命令时给出明确用法提示。
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -91,11 +133,21 @@ def build_parser() -> argparse.ArgumentParser:
     # index 命令接受一个或多个文件/目录，并提供分段参数。
     index_parser = subparsers.add_parser(
         "index",
-        help="导入并索引 TXT、Markdown、PDF、PPTX、JSON 文件",
+        help="导入并结构化索引文档、JSON 和 Python/C/C++ 代码",
     )
     index_parser.add_argument("paths", nargs="+", type=Path, help="文件或目录，可重复传入")
     index_parser.add_argument("--chunk-size", type=int, default=800, help="分段目标字符数")
-    index_parser.add_argument("--overlap", type=int, default=100, help="超长段落的重叠字符数")
+    index_parser.add_argument("--overlap", type=int, default=200, help="最终块的上下文重叠字符数")
+    index_parser.add_argument("--min-chunk-chars", type=int, default=200)
+    index_parser.add_argument("--max-chunk-chars", type=int, default=1600)
+    index_parser.add_argument("--semantic-merge-threshold", type=float, default=0.80)
+    index_parser.add_argument("--max-chunk-tokens", type=int, default=8192)
+    index_parser.add_argument(
+        "--embedding",
+        action="store_true",
+        help="使用 Qwen3 语义合并并写入最终 Chunk 向量",
+    )
+    _add_embedding_options(index_parser)
     index_parser.add_argument("--force", action="store_true", help="忽略哈希，强制重新索引")
     index_parser.add_argument(
         "--json-config",
@@ -214,7 +266,18 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("query", help="关键词，可输入多个词，默认 AND 匹配")
     search_parser.add_argument("--limit", type=int, default=10, help="最多返回条数（默认：10）")
     search_parser.add_argument("--no-color", action="store_true", help="不使用 ANSI 颜色，改用 [[...]] 标记")
+    search_parser.add_argument(
+        "--vector", action="store_true", help="使用 Qwen3 + NumPy 向量 Top-K"
+    )
+    search_parser.add_argument("--code-query", action="store_true")
+    _add_embedding_options(search_parser)
     _add_runtime_options(search_parser)
+
+    embed_parser = subparsers.add_parser(
+        "embed", help="基于已有 Chunk 增量生成或重建 Embedding"
+    )
+    _add_embedding_options(embed_parser)
+    _add_runtime_options(embed_parser)
 
     ask_parser = subparsers.add_parser(
         "ask",
@@ -237,6 +300,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="覆盖配置中的模型 temperature",
     )
+    ask_parser.add_argument(
+        "--vector", action="store_true", help="使用 Qwen3 向量检索作为 RAG 召回"
+    )
+    ask_parser.add_argument("--code-query", action="store_true")
+    _add_embedding_options(ask_parser)
     _add_runtime_options(ask_parser)
 
     # stats 只读取数据库统计信息，不执行索引或搜索。
@@ -249,7 +317,10 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument(
         "--type",
         dest="file_type",
-        choices=("txt", "md", "pdf", "pptx", "json"),
+        choices=(
+            "txt", "md", "pdf", "pptx", "json", "py",
+            "c", "h", "cc", "cpp", "cxx", "hpp",
+        ),
         help="只搜索指定文件类型",
     )
     search_parser.add_argument(
@@ -300,7 +371,8 @@ def _print_index_stats(stats) -> None:
         "索引完成："
         f"发现 {stats.files_found}，新增/更新 {stats.indexed}，"
         f"跳过 {stats.skipped}，空文本 {stats.empty}，"
-        f"超大 JSON {stats.oversized}，失败 {stats.failed}"
+        f"超大 JSON {stats.oversized}，失败 {stats.failed}，"
+        f"生成向量 {stats.embeddings_generated}"
     )
 
 
@@ -334,6 +406,7 @@ def _print_documents(documents) -> None:
     for document in documents:
         print(f"- {document.filename} ({document.file_type})")
         print(f"  路径：{document.path}")
+        print(f"  解析器：{document.parser or 'legacy'}")
         print(
             f"  大小：{document.size} 字节；分段数：{document.chunk_count}；"
             f"索引时间：{document.indexed_at}"
@@ -346,6 +419,7 @@ def _print_health(report) -> None:
     print(f"文档数：{report.document_count}")
     print(f"分段数：{report.chunk_count}")
     print(f"chunks FTS5 数：{report.chunks_fts_count}")
+    print(f"结构 FTS5 数：{report.chunks_embedding_fts_count}")
     print(f"chunk_tokens 数：{report.chunk_tokens_count}")
     print(f"中文 FTS5 数：{report.chunks_fts_jieba_count}")
     for issue in report.issues:
@@ -486,11 +560,17 @@ def _run(args: argparse.Namespace) -> int:
                 if args.json_config is not None
                 else None
             )
+            embedding_backend = _embedding_backend(args) if args.embedding else None
             stats = index_paths(
                 knowledge_base,
                 args.paths,
                 chunk_size=args.chunk_size,
                 overlap=args.overlap,
+                min_chunk_chars=args.min_chunk_chars,
+                max_chunk_chars=args.max_chunk_chars,
+                semantic_merge_threshold=args.semantic_merge_threshold,
+                max_chunk_tokens=args.max_chunk_tokens,
+                embedding_backend=embedding_backend,
                 force=args.force,
                 json_profile=json_profile,
                 exclude_dirs=args.exclude_dirs,
@@ -504,20 +584,46 @@ def _run(args: argparse.Namespace) -> int:
             unsuccessful = stats.failed + stats.oversized
             return 1 if unsuccessful and not stats.indexed else 0
 
+        if args.command == "embed":
+            backend = _embedding_backend(args)
+            generated = 0
+            for document in knowledge_base.list_documents():
+                generated += knowledge_base.ensure_document_embeddings(
+                    Path(document.path),
+                    backend,
+                    chunker_fingerprint=document.chunker_fingerprint,
+                )
+            print(
+                f"Embedding 完成：模型 {backend.settings.model_name}@"
+                f"{backend.model_revision}，新增/更新 {generated}"
+            )
+            return 0
+
         if args.command == "stats":
             # 输出数据库位置和两类核心数量指标。
             print(f"数据库：{knowledge_base.db_path}")
             print(f"文档数：{knowledge_base.document_count()}")
             print(f"分段数：{knowledge_base.chunk_count()}")
+            print(f"Embedding 配置数：{knowledge_base.embedding_model_count()}")
+            print(f"向量数：{knowledge_base.embedding_count()}")
             return 0
 
         if args.command == "ask":
             config = _load_rag_config(args)
-            retriever = KeywordRetriever(
-                knowledge_base,
-                top_k=config.top_k,
-                max_context_chars=config.max_context_chars,
-            )
+            if args.vector:
+                retriever = VectorRetriever(
+                    knowledge_base,
+                    _embedding_backend(args),
+                    top_k=config.top_k,
+                    max_context_chars=config.max_context_chars,
+                    code=args.code_query,
+                )
+            else:
+                retriever = KeywordRetriever(
+                    knowledge_base,
+                    top_k=config.top_k,
+                    max_context_chars=config.max_context_chars,
+                )
             answerer = RagAnswerer(
                 retriever,
                 temperature=config.temperature,
@@ -528,12 +634,23 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "search":
             # 搜索模块返回已排序的结果对象。
-            results = knowledge_base.search(
-                args.query,
-                limit=args.limit,
-                file_type=args.file_type,
-                path=args.path,
-            )
+            if args.vector:
+                results = NumpyVectorIndex(
+                    knowledge_base, _embedding_backend(args)
+                ).search(
+                    args.query,
+                    top_k=args.limit,
+                    code=args.code_query,
+                    file_type=args.file_type,
+                    path=args.path,
+                )
+            else:
+                results = knowledge_base.search(
+                    args.query,
+                    limit=args.limit,
+                    file_type=args.file_type,
+                    path=args.path,
+                )
             if not results:
                 # 空结果不是命令错误，因此仍返回 0。
                 print("没有找到匹配内容。")
@@ -544,6 +661,27 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"[{number}] {result.filename} ({result.file_type})")
                 print(f"    路径：{result.document_path}")
                 print(f"    分段：{result.chunk_index}  score：{result.score:.4f}")
+                locations = []
+                if result.heading_path:
+                    locations.append("标题 " + " > ".join(result.heading_path))
+                if result.record_path:
+                    locations.append(f"JSON 路径 {result.record_path}")
+                if result.page_number is not None:
+                    locations.append(f"第 {result.page_number} 页")
+                if result.slide_number is not None:
+                    locations.append(f"幻灯片 {result.slide_number}")
+                if result.shape_index is not None:
+                    locations.append(f"形状 {result.shape_index}")
+                if result.symbol_path:
+                    separator = "." if result.file_type == "py" else "::"
+                    locations.append("符号 " + separator.join(result.symbol_path))
+                if result.start_line is not None:
+                    line_range = str(result.start_line)
+                    if result.end_line not in {None, result.start_line}:
+                        line_range += f"-{result.end_line}"
+                    locations.append(f"行 {line_range}")
+                if locations:
+                    print(f"    定位：{'；'.join(locations)}")
                 if args.no_color:
                     # 无颜色模式使用可见的 [[...]] 标记，适合重定向到文件。
                     content = highlight_text(result.content, args.query, "[[", "]]")

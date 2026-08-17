@@ -112,10 +112,12 @@ class JsonTextBlock(str):
         *,
         record_start: bool,
         record_end: bool,
+        record_path: str | None = None,
     ) -> "JsonTextBlock":
         value = super().__new__(cls, text)
         value.record_start = record_start
         value.record_end = record_end
+        value.record_path = record_path
         return value
 
 
@@ -966,13 +968,15 @@ def _iter_formatted_records(
                 "record_path 不是 $ 时，fields/filter 不能使用以 $ 开头的根节点路径"
             )
 
-    for record in _iter_streamed_records(
+    records = _iter_streamed_records(
         path,
         profile.record_path,
         read_size=read_size,
         max_size=max_size,
         record_probe_size=record_probe_size,
-    ):
+    )
+    for record_number, record in enumerate(records):
+        concrete_path = _record_locator(profile.record_path, record_number)
         if isinstance(record, _LargeJsonRecord):
             if not allow_large_records:
                 _raise_large_record_for_materialized_consumer(record)
@@ -983,13 +987,55 @@ def _iter_formatted_records(
             )
             # 超大记录无法安全地 materialize，因此无法应用字段选择和
             # filter；保留完整原始 JSON 记录，确保数据不被截断或拼接。
-            yield from record.iter_chunks()
+            for part in record.iter_chunks():
+                yield JsonTextBlock(
+                    str(part),
+                    record_start=getattr(part, "record_start", True),
+                    record_end=getattr(part, "record_end", True),
+                    record_path=concrete_path,
+                )
             continue
         if not all(_matches_filter(record, rule, record) for rule in profile.filters):
             continue
         text = _format_record(record, profile, record)
         if text:
-            yield text
+            yield JsonTextBlock(
+                text,
+                record_start=True,
+                record_end=True,
+                record_path=concrete_path,
+            )
+
+
+def _record_locator(configured_path: str, record_number: int) -> str:
+    """Convert a configured wildcard path to a concrete citation locator."""
+
+    locator = configured_path.strip()
+    if locator == "$":
+        return f"$[{record_number}]"
+    locator = locator.removeprefix("$.").removeprefix("$")
+    if "[*]" in locator:
+        return locator.replace("[*]", f"[{record_number}]", 1)
+    return locator or "$"
+
+
+def iter_json_record_text(
+    path: Path,
+    profile: JsonProfile,
+    *,
+    read_size: int = DEFAULT_JSON_READ_SIZE,
+    max_size: int = DEFAULT_MAX_JSON_SIZE,
+    record_probe_size: int = DEFAULT_JSON_RECORD_PROBE_SIZE,
+) -> Iterator[JsonTextBlock]:
+    """Stream formatted records with explicit boundaries and source paths."""
+
+    yield from _iter_formatted_records(
+        path,
+        profile,
+        read_size=read_size,
+        max_size=max_size,
+        record_probe_size=record_probe_size,
+    )
 
 
 def iter_json_text(

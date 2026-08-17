@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..database import KnowledgeBase
+from ..extractors import SUPPORTED_SUFFIXES
 from ..indexer import index_paths
 from ..rag.answer import RagAnswerer, RagConfig
 from ..rag.llm_client import LLMClient, LLMClientError
@@ -39,11 +40,11 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_UPLOAD_DIR = Path("uploads")
 
 # Accepted extension set mirrors the extractor's supported types.
-_UPLOAD_SUFFIXES = {".txt", ".md", ".pdf", ".pptx", ".json"}
+_UPLOAD_SUFFIXES = SUPPORTED_SUFFIXES
 
 # Keep the limits in one place so both direct callers and HTTP requests use
 # the same policy.  The upload limit is deliberately conservative for a local
-# browser service; V3 does not need a large-object store.
+# browser service; this local tool does not need a large-object store.
 _MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 _MAX_MULTIPART_OVERHEAD = 64 * 1024
 _MAX_JSON_BODY_BYTES = 1_000_000
@@ -52,6 +53,29 @@ _MAX_INDEX_PATHS = 100
 _MAX_QUESTION_CHARS = 10_000
 _MAX_CHUNK_SIZE = 100_000
 _MAX_CONTEXT_CHARS = 100_000
+
+
+def _search_result_location(result: Any) -> str:
+    parts: list[str] = []
+    if result.heading_path:
+        parts.append(" > ".join(result.heading_path))
+    if result.record_path:
+        parts.append(f"JSON {result.record_path}")
+    if result.page_number is not None:
+        parts.append(f"第 {result.page_number} 页")
+    if result.slide_number is not None:
+        parts.append(f"幻灯片 {result.slide_number}")
+    if result.shape_index is not None:
+        parts.append(f"形状 {result.shape_index}")
+    if result.symbol_path:
+        separator = "." if result.file_type == "py" else "::"
+        parts.append(separator.join(result.symbol_path))
+    if result.start_line is not None:
+        line_range = str(result.start_line)
+        if result.end_line is not None and result.end_line != result.start_line:
+            line_range += f"-{result.end_line}"
+        parts.append(f"行 {line_range}")
+    return " · ".join(parts)
 
 
 class KnowledgeWebApp:
@@ -97,6 +121,7 @@ class KnowledgeWebApp:
                         "size": document.size,
                         "chunks": document.chunk_count,
                         "indexed_at": document.indexed_at,
+                        "parser": document.parser,
                     }
                     for document in knowledge_base.list_documents()
                 ]
@@ -119,6 +144,19 @@ class KnowledgeWebApp:
                 "score": result.score,
                 "content": result.content,
                 "highlighted": result.highlighted_content,
+                "embedding_content": result.embedding_content,
+                "block_id": result.block_id,
+                "block_type": result.block_type,
+                "language": result.language,
+                "heading_path": list(result.heading_path),
+                "symbol_path": list(result.symbol_path),
+                "start_line": result.start_line,
+                "end_line": result.end_line,
+                "page_number": result.page_number,
+                "record_path": result.record_path,
+                "slide_number": result.slide_number,
+                "shape_index": result.shape_index,
+                "location": _search_result_location(result),
             }
             for result in results
         ]
@@ -167,6 +205,15 @@ class KnowledgeWebApp:
                     "chunk_index": source.chunk_index,
                     "chunk_indexes": list(source.chunk_indexes or (source.chunk_index,)),
                     "score": source.score,
+                    "heading_path": list(source.heading_path),
+                    "symbol_path": list(source.symbol_path),
+                    "start_line": source.start_line,
+                    "end_line": source.end_line,
+                    "page_number": source.page_number,
+                    "record_path": source.record_path,
+                    "slide_number": source.slide_number,
+                    "shape_index": source.shape_index,
+                    "location": " · ".join(source.location_parts),
                 }
                 for source in result.sources
             ],
@@ -177,7 +224,7 @@ class KnowledgeWebApp:
         paths: list[Path],
         *,
         chunk_size: int = 800,
-        overlap: int = 100,
+        overlap: int = 200,
     ) -> dict[str, Any]:
         if not paths:
             raise ValueError("没有可索引的路径。")
@@ -243,7 +290,8 @@ class KnowledgeWebApp:
         suffix = Path(safe_name).suffix.lower()
         if suffix not in _UPLOAD_SUFFIXES:
             raise ValueError(
-                "不支持的文件类型；仅支持 TXT、Markdown、PDF、PPTX 和 JSON。"
+                "不支持的文件类型；仅支持 TXT、Markdown、PDF、PPTX、JSON、"
+                "Python 和 C/C++。"
             )
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         upload_root = self.upload_dir.resolve()
@@ -408,7 +456,7 @@ class KnowledgeRequestHandler(BaseHTTPRequestHandler):
                 if not paths:
                     raise ValueError("没有可索引的路径。")
                 chunk_size = int(payload.get("chunk_size", 800))
-                overlap = int(payload.get("overlap", 100))
+                overlap = int(payload.get("overlap", 200))
                 self._send_json(
                     self.app.index_paths(
                         paths, chunk_size=chunk_size, overlap=overlap

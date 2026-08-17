@@ -14,7 +14,9 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 # 索引流水线依次调用流式清洗、流式分段和数据库写入模块。
-from .chunking import iter_chunk_text
+from .block_parsing import iter_document_blocks
+from .chunking import ChunkingConfig, iter_chunk_blocks, iter_chunk_text
+from .embedding import EmbeddingBackend
 from .cleaning import iter_clean_text
 from .database import KnowledgeBase
 from .extractors import SUPPORTED_SUFFIXES, extract_document, iter_document_text
@@ -231,7 +233,12 @@ def index_paths(
     inputs: Iterable[Path],
     *,
     chunk_size: int = 800,
-    overlap: int = 100,
+    overlap: int = 200,
+    min_chunk_chars: int = 200,
+    max_chunk_chars: int = 1600,
+    semantic_merge_threshold: float = 0.80,
+    max_chunk_tokens: int = 8192,
+    embedding_backend: EmbeddingBackend | None = None,
     force: bool = False,
     json_profile: JsonProfile | None = None,
     exclude_dirs: Iterable[str | Path] | None = None,
@@ -247,7 +254,14 @@ def index_paths(
         raise ValueError("JSON 最大文件大小不能小于 0")
     if json_record_probe_size <= 0:
         raise ValueError("JSON 单条记录探测窗口必须大于 0")
-
+    chunking_config = ChunkingConfig(
+        core_chunk_chars=chunk_size,
+        overlap_chars=overlap,
+        min_chunk_chars=min(min_chunk_chars, chunk_size),
+        max_chunk_chars=max_chunk_chars,
+        semantic_merge_threshold=semantic_merge_threshold,
+        max_chunk_tokens=max_chunk_tokens,
+    )
     excluded_files = list(exclude_files)
     # 配置文件可能位于待索引目录中；它是规则而不是知识内容，必须从候选
     # 文件中排除。discover_files 同时还会去重重叠输入目录产生的路径。
@@ -266,6 +280,9 @@ def index_paths(
     )
     stats.files_found = len(paths)
     logger.info("发现 %s 个待处理文件", stats.files_found)
+    if not paths:
+        return stats
+    chunker_fingerprint = chunking_config.fingerprint_for(embedding_backend)
 
     def report(current: int, path: Path, status: str) -> None:
         if progress_callback is None:
@@ -300,25 +317,39 @@ def index_paths(
                 path,
                 parser_fingerprint=profile.fingerprint if profile else "",
             )
-            if not force and knowledge_base.is_unchanged(document):
+            if not force and knowledge_base.is_unchanged(
+                document, chunker_fingerprint=chunker_fingerprint
+            ):
+                if embedding_backend is not None:
+                    stats.embeddings_generated += (
+                        knowledge_base.ensure_document_embeddings(
+                            document.path,
+                            embedding_backend,
+                            chunker_fingerprint=chunker_fingerprint,
+                        )
+                    )
                 # 内容哈希不变时不重复清洗、分段和写数据库。
                 stats.skipped += 1
                 status = "skipped"
                 logger.info("跳过未变化文件：%s", path)
                 continue
 
-            # 抽取器、清洗器和分段器全部返回迭代器，不在索引器中保存全文。
-            source_text = iter_document_text(
+            # 先产生结构块，再只在单个结构块内部执行长度切分。
+            source_blocks = iter_document_blocks(
                 document,
                 json_profile=profile,
                 max_json_size=max_json_size,
                 json_record_probe_size=json_record_probe_size,
             )
-            chunks = _iter_index_chunks(
-                source_text,
+            chunks = iter_chunk_blocks(
+                source_blocks,
                 chunk_size=chunk_size,
                 overlap=overlap,
-                separate_records=profile is not None and profile.index_mode == "record",
+                min_chunk_chars=min_chunk_chars,
+                max_chunk_chars=max_chunk_chars,
+                semantic_merge_threshold=semantic_merge_threshold,
+                max_chunk_tokens=max_chunk_tokens,
+                embedding_backend=embedding_backend,
             )
 
             # 用计数器包装分段流，只记录数量，不保存已经写入数据库的分段。
@@ -331,7 +362,14 @@ def index_paths(
                     yield chunk
 
             # 在事务中替换旧文档，并由数据库层逐个消费分段生成器。
-            knowledge_base.replace_document(document, counted_chunks())
+            knowledge_base.replace_document(
+                document,
+                counted_chunks(),
+                embedding_backend=embedding_backend,
+                chunker_fingerprint=chunker_fingerprint,
+            )
+            if embedding_backend is not None:
+                stats.embeddings_generated += chunk_count
             if chunk_count == 0:
                 # 文件可能从有内容变成空文件，清理刚写入的空记录和旧索引。
                 knowledge_base.remove_document(document.path)

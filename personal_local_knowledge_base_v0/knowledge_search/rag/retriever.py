@@ -1,4 +1,4 @@
-"""Reuse the V1 FTS5 search as the retrieval stage for RAG."""
+"""Use the local FTS5 indexes as the retrieval stage for RAG."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from itertools import combinations
 from ..database import KnowledgeBase
 from ..models import SearchResult
 from ..tokenization import tokenize_for_search
+from ..embedding import EmbeddingBackend
+from ..vector_search import NumpyVectorIndex
 
 
 _QUESTION_STOPWORDS = {
@@ -88,6 +90,37 @@ class RetrievedChunk:
     score: float
     content: str
     chunk_indexes: tuple[int, ...] = ()
+    heading_path: tuple[str, ...] = ()
+    symbol_path: tuple[str, ...] = ()
+    start_line: int | None = None
+    end_line: int | None = None
+    page_number: int | None = None
+    record_path: str | None = None
+    slide_number: int | None = None
+    shape_index: int | None = None
+
+    @property
+    def location_parts(self) -> tuple[str, ...]:
+        parts: list[str] = []
+        if self.heading_path:
+            parts.append(f"标题 {' > '.join(self.heading_path)}")
+        if self.record_path:
+            parts.append(f"JSON 路径 {self.record_path}")
+        if self.page_number is not None:
+            parts.append(f"第 {self.page_number} 页")
+        if self.slide_number is not None:
+            parts.append(f"幻灯片 {self.slide_number}")
+        if self.shape_index is not None:
+            parts.append(f"形状 {self.shape_index}")
+        if self.symbol_path:
+            separator = "." if self.file_type == "py" else "::"
+            parts.append(f"符号 {separator.join(self.symbol_path)}")
+        if self.start_line is not None:
+            line_range = str(self.start_line)
+            if self.end_line is not None and self.end_line != self.start_line:
+                line_range += f"-{self.end_line}"
+            parts.append(f"行 {line_range}")
+        return tuple(parts)
 
     @property
     def citation(self) -> str:
@@ -96,7 +129,8 @@ class RetrievedChunk:
             chunk_label = str(indexes[0])
         else:
             chunk_label = "、".join(str(index) for index in indexes)
-        return f"[{self.citation_id}] {self.filename}，分段 {chunk_label}"
+        suffix = "".join(f"，{part}" for part in self.location_parts)
+        return f"[{self.citation_id}] {self.filename}，分段 {chunk_label}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -153,7 +187,7 @@ class KeywordRetriever:
         if results or len(tokens) == 1:
             return results
 
-        # V1 uses precise AND matching. A long natural question often contains one
+        # The database uses precise AND matching. A long natural question often contains one
         # unmatched descriptive word. Pair queries preserve entity co-occurrence,
         # which is crucial in a large corpus where single common terms are noisy.
         candidates: dict[int, dict[str, object]] = {}
@@ -221,14 +255,38 @@ class KeywordRetriever:
             window = self.knowledge_base.chunk_window(result.chunk_id, radius=1)
             if window:
                 chunk_indexes = tuple(chunk.index for chunk in window)
-                window_content = "\n\n".join(
-                    f"[分段 {chunk.index}]\n{chunk.content}" for chunk in window
-                )
+                # 结构信息只放在来源头部；正文保持可直接引用的 canonical 原文。
+                window_content = "\n\n".join(chunk.canonical_content for chunk in window)
             else:
                 chunk_indexes = (result.chunk_index,)
                 window_content = result.content
             chunk_label = "、".join(str(index) for index in chunk_indexes)
-            header = f"[{citation_id}] 文件：{result.filename}；分段：{chunk_label}\n"
+            location_parts: list[str] = []
+            if result.heading_path:
+                location_parts.append(f"标题：{' > '.join(result.heading_path)}")
+            if result.record_path:
+                location_parts.append(f"JSON 路径：{result.record_path}")
+            if result.page_number is not None:
+                location_parts.append(f"页码：{result.page_number}")
+            if result.slide_number is not None:
+                location_parts.append(f"幻灯片：{result.slide_number}")
+            if result.shape_index is not None:
+                location_parts.append(f"形状：{result.shape_index}")
+            if result.symbol_path:
+                separator_symbol = "." if result.file_type == "py" else "::"
+                location_parts.append(
+                    f"符号：{separator_symbol.join(result.symbol_path)}"
+                )
+            if result.start_line is not None:
+                line_range = str(result.start_line)
+                if result.end_line is not None and result.end_line != result.start_line:
+                    line_range += f"-{result.end_line}"
+                location_parts.append(f"行号：{line_range}")
+            location = "".join(f"；{part}" for part in location_parts)
+            header = (
+                f"[{citation_id}] 文件：{result.filename}；分段：{chunk_label}"
+                f"{location}\n"
+            )
             available = self.max_context_chars - current_length - len(separator) - len(header)
             if available <= 0:
                 truncated = True
@@ -252,6 +310,14 @@ class KeywordRetriever:
                     score=result.score,
                     content=excerpt,
                     chunk_indexes=chunk_indexes,
+                    heading_path=result.heading_path,
+                    symbol_path=result.symbol_path,
+                    start_line=result.start_line,
+                    end_line=result.end_line,
+                    page_number=result.page_number,
+                    record_path=result.record_path,
+                    slide_number=result.slide_number,
+                    shape_index=result.shape_index,
                 )
             )
             if len(excerpt) < len(window_content):
@@ -265,4 +331,30 @@ class KeywordRetriever:
             chunks=tuple(chunks),
             context="".join(blocks),
             truncated=truncated,
+        )
+
+
+class VectorRetriever(KeywordRetriever):
+    """Use Qwen3 + NumPy Top-K while reusing the citation/context builder."""
+
+    def __init__(
+        self,
+        knowledge_base: KnowledgeBase,
+        embedding_backend: EmbeddingBackend,
+        *,
+        top_k: int = 5,
+        max_context_chars: int = 12_000,
+        code: bool = False,
+    ) -> None:
+        super().__init__(
+            knowledge_base,
+            top_k=top_k,
+            max_context_chars=max_context_chars,
+        )
+        self.vector_index = NumpyVectorIndex(knowledge_base, embedding_backend)
+        self.code = code
+
+    def _search(self, question: str) -> list[SearchResult]:
+        return self.vector_index.search(
+            question, top_k=self.top_k, code=self.code
         )

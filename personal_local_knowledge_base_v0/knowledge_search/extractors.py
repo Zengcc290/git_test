@@ -4,10 +4,12 @@ from __future__ import annotations
 
 # codecs 提供支持跨块解码的增量解码器。
 import codecs
+import ast
 # hashlib 用于计算源文件指纹，实现增量索引。
 import hashlib
 # logging 负责记录编码降级、PDF 页失败等可诊断信息。
 import logging
+import tokenize
 # Path 提供跨平台的文件系统访问。
 from pathlib import Path
 from collections.abc import Iterator
@@ -23,7 +25,10 @@ from .models import ExtractedDocument
 
 
 # 目前支持纯文本、Markdown、带文本层的 PDF、PPTX 和配置驱动的 JSON。
-SUPPORTED_SUFFIXES = {".txt", ".md", ".pdf", ".pptx", ".json"}
+SUPPORTED_SUFFIXES = {
+    ".txt", ".md", ".pdf", ".pptx", ".json", ".py",
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp",
+}
 # 单次读取的字节数；它限制 TXT/Markdown 的读取缓存大小。
 DEFAULT_READ_SIZE = 64 * 1024
 # 为当前模块创建独立 logger，便于按模块筛选日志。
@@ -192,6 +197,28 @@ def extract_document(
 
     # stat 只读取文件元数据；text 保留为 None，正文由 iter_document_text 延迟读取。
     stat = path.stat()
+    parser_by_type = {
+        "txt": "text-line",
+        "md": "markdown-block",
+        "pdf": "pypdf",
+        "pptx": "python-pptx",
+        "json": "json-stream",
+        "c": "cpp-brace",
+        "h": "cpp-brace",
+        "cc": "cpp-brace",
+        "cpp": "cpp-brace",
+        "cxx": "cpp-brace",
+        "hpp": "cpp-brace",
+    }
+    parser = parser_by_type.get(suffix[1:], "")
+    if suffix == ".py":
+        parser = "python-ast"
+        try:
+            with tokenize.open(path) as source:
+                ast.parse(source.read(), filename=str(path), type_comments=True)
+        except (SyntaxError, UnicodeDecodeError):
+            parser = "fallback-line"
+
     return ExtractedDocument(
         path=path,
         file_type=suffix[1:],
@@ -200,6 +227,7 @@ def extract_document(
         size=stat.st_size,
         modified_ns=stat.st_mtime_ns,
         parser_fingerprint=parser_fingerprint,
+        parser=parser,
     )
 
 
@@ -219,7 +247,9 @@ def iter_document_text(
         return
 
     # 普通文本文件走固定大小的增量解码器。
-    if document.file_type in {"txt", "md"}:
+    if document.file_type in {
+        "txt", "md", "py", "c", "h", "cc", "cpp", "cxx", "hpp"
+    }:
         yield from _iter_text_file(document.path, read_size)
         return
     # PDF 按页产生文本，PPTX 按幻灯片产生文本。

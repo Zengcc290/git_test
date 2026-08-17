@@ -1,0 +1,18 @@
+{
+  "core_chunk_chars": 800,
+  "overlap_chars": 200,
+  "min_chunk_chars": 200,
+  "max_chunk_chars": 1600,
+  "max_chunk_tokens": 8192,
+  "semantic_merge_threshold": 0.8,
+  "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+  "embedding_base_url": "http://127.0.0.1:8000",
+  "embedding_protocol": "auto",
+  "embedding_model_revision": null,
+  "embedding_timeout_seconds": 120,
+  "embedding_dimension": 1024,
+  "vector_dtype": "float32",
+  "batch_size": 8,
+  "normalize_embeddings": true,
+  "query_instruction": "根据用户问题，从知识库中检索能够直接回答问题的相关文档片段"
+}

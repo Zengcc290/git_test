@@ -94,10 +94,10 @@
       <div class="panel" id="panel-import" role="tabpanel" hidden>
         <div class="panel-head">
           <h2>导入文档</h2>
-          <p>上传 TXT、Markdown、PDF、PPTX 或 JSON 文件并立即索引。</p>
+          <p>上传文档、JSON 或 Python/C/C++ 代码文件并立即索引。</p>
         </div>
         <form id="upload-form" class="upload-zone">
-          <input id="upload-input" type="file" multiple accept=".txt,.md,.pdf,.pptx,.json" />
+          <input id="upload-input" type="file" multiple accept=".txt,.md,.pdf,.pptx,.json,.py,.c,.h,.cc,.cpp,.cxx,.hpp" />
           <div class="upload-hint">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/></svg>
             <span>选择文件后自动上传并索引</span>
@@ -129,5 +129,3 @@
   <script src="/app.js"></script>
 </body>
 </html>
-
-
