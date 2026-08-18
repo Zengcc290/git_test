@@ -9,6 +9,7 @@ import logging
 import os
 # sqlite3 是 Python 标准库中的 SQLite 驱动。
 import sqlite3
+import unicodedata
 from datetime import datetime, timezone
 # Path 用于创建数据库目录并稳定处理文件路径。
 from pathlib import Path
@@ -240,6 +241,31 @@ def _json_tuple(value: str | None) -> tuple[str, ...]:
     if not isinstance(parsed, list):
         return ()
     return tuple(str(item) for item in parsed)
+
+
+def _compact_match_text(text: str) -> str:
+    """Normalize text for chunk matching without performing word segmentation."""
+
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def _character_ngrams(text: str, *, size: int = 2, limit: int = 64) -> list[str]:
+    """Return bounded character n-grams while preserving their original order."""
+
+    if not text:
+        return []
+    if len(text) < size:
+        return [text]
+
+    grams = list(
+        dict.fromkeys(text[index : index + size] for index in range(len(text) - size + 1))
+    )
+    if len(grams) <= limit:
+        return grams
+
+    # Sample the whole question block instead of keeping only its prefix.
+    return [grams[index * len(grams) // limit] for index in range(limit)]
 
 
 class KnowledgeBase:
@@ -1118,6 +1144,77 @@ class KnowledgeBase:
             )
             for row in rows
         ]
+
+    def search_chunk_matches(
+        self,
+        query_chunk: str,
+        limit: int = 10,
+    ) -> list[SearchResult]:
+        """Match one question chunk against structured chunks without jieba."""
+
+        if limit <= 0:
+            raise ValueError("limit 必须大于 0")
+
+        compact_query = _compact_match_text(query_chunk)
+        grams = _character_ngrams(compact_query)
+        if not grams:
+            return []
+
+        escaped_patterns = [
+            f"%{gram.replace('!', '!!').replace('%', '!%').replace('_', '!_')}%"
+            for gram in grams
+        ]
+        predicates = ["c.embedding_content LIKE ? ESCAPE '!'" for _ in grams]
+        hit_expression = " + ".join(
+            f"CASE WHEN {predicate} THEN 1 ELSE 0 END"
+            for predicate in predicates
+        )
+        candidate_limit = max(limit * 40, 200)
+        rows = self.connection.execute(
+            f"""
+            SELECT
+                c.id AS chunk_id,
+                c.embedding_content AS match_content,
+                ({hit_expression}) AS gram_hits
+            FROM chunks AS c
+            WHERE {" OR ".join(predicates)}
+            ORDER BY gram_hits DESC, LENGTH(c.embedding_content) ASC, c.id DESC
+            LIMIT ?
+            """,
+            [*escaped_patterns, *escaped_patterns, candidate_limit],
+        ).fetchall()
+
+        ranked: list[tuple[int, int, float]] = []
+        for row in rows:
+            compact_content = _compact_match_text(row["match_content"])
+            longest = 0
+            # Reward an intact phrase over isolated character pairs.
+            maximum = min(len(compact_query), len(compact_content), 64)
+            for size in range(maximum, 1, -1):
+                if any(
+                    compact_query[start : start + size] in compact_content
+                    for start in range(len(compact_query) - size + 1)
+                ):
+                    longest = size
+                    break
+            if (
+                longest == 0
+                and len(compact_query) == 1
+                and compact_query in compact_content
+            ):
+                longest = 1
+
+            gram_hits = int(row["gram_hits"])
+            relevance = float(longest * 1000 + gram_hits)
+            ranked.append((int(row["chunk_id"]), len(compact_content), relevance))
+
+        ranked.sort(key=lambda item: (-item[2], item[1], item[0]))
+        selected = ranked[:limit]
+        return self.results_for_vector_scores(
+            [chunk_id for chunk_id, _length, _score in selected],
+            [-score for _chunk_id, _length, score in selected],
+            query_chunk,
+        )
 
     def chunk_window(self, chunk_id: int, radius: int = 1) -> list[Chunk]:
         """Return neighbors without crossing page, record, slide, or code boundaries."""

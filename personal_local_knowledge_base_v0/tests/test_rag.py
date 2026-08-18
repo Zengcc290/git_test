@@ -21,7 +21,7 @@ from knowledge_search.rag.llm_client import (
     TokenUsage,
 )
 from knowledge_search.rag.prompt import REFUSAL_ANSWER, SYSTEM_PROMPT, build_messages
-from knowledge_search.rag.retriever import KeywordRetriever
+from knowledge_search.rag.retriever import ChunkRetriever, KeywordRetriever
 
 
 def _document(path: Path, content: str, sha256: str) -> ExtractedDocument:
@@ -127,7 +127,7 @@ class RagTests(unittest.TestCase):
                 "https://environment.example/v1/chat/completions",
             )
 
-    def test_natural_question_retrieves_relevant_fts5_chunk(self):
+    def test_natural_question_retrieves_relevant_chunk(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with KnowledgeBase(root / "knowledge.db") as knowledge_base:
@@ -147,7 +147,28 @@ class RagTests(unittest.TestCase):
             self.assertEqual(retrieval.chunks[0].chunk_index, 0)
             self.assertIn("[1] 文件：sqlite.md；分段：0", retrieval.context)
 
-    def test_long_natural_question_uses_keyword_pairs_in_large_noisy_corpus(self):
+    def test_question_chunk_matching_does_not_use_jieba(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                content = "猫在树下乘凉"
+                knowledge_base.replace_document(
+                    _document(root / "cat.txt", content, "cat-hash"),
+                    [Chunk(0, content)],
+                )
+
+                with patch(
+                    "knowledge_search.database.tokenize_for_search",
+                    side_effect=AssertionError("问答召回不应使用 jieba"),
+                ):
+                    retrieval = ChunkRetriever(knowledge_base, top_k=1).retrieve(
+                        "猫在树下干什么"
+                    )
+
+            self.assertEqual(retrieval.chunks[0].filename, "cat.txt")
+            self.assertEqual(retrieval.chunks[0].content, content)
+
+    def test_long_natural_question_ranks_shared_phrases_in_large_noisy_corpus(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with KnowledgeBase(root / "knowledge.db") as knowledge_base:

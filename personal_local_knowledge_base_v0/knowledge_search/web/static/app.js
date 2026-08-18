@@ -66,8 +66,9 @@ async function loadStats() {
     const stats = await api("/api/stats");
     $("#stat-documents").textContent = stats.documents;
     $("#stat-chunks").textContent = stats.chunks;
+    const modeLabel = stats.search_mode === "semantic" ? "语义检索" : "关键词检索";
     $("#sidebar-note").textContent = stats.documents
-      ? `数据库已就绪，共 ${stats.documents} 篇文档。`
+      ? `${modeLabel}已启用，共 ${stats.documents} 篇文档。`
       : "数据库为空，请先导入文档。";
   } catch (err) {
     $("#sidebar-note").textContent = "无法读取统计信息。";
@@ -82,7 +83,7 @@ $("#search-form").addEventListener("submit", async (event) => {
   if (!q) { box.innerHTML = ""; return; }
   box.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
   try {
-    const data = await api(`/api/search?q=${encodeURIComponent(q)}&limit=10`);
+    const data = await api(`/api/search?q=${encodeURIComponent(q)}&limit=10&mode=semantic`);
     renderSearch(data.results);
   } catch (err) {
     box.innerHTML = `<div class="empty">搜索失败：${escapeHtml(err.message)}</div>`;
@@ -133,6 +134,7 @@ $("#ask-form").addEventListener("submit", async (event) => {
       top_k: parseInt($("#ask-topk").value, 10) || 5,
       max_context_chars: parseInt($("#ask-context").value, 10) || 12000,
       temperature: parseFloat($("#ask-temperature").value) || 0,
+      mode: "semantic",
     };
     const data = await api("/api/ask", { method: "POST", body: JSON.stringify(payload) });
     renderAnswer(data);
@@ -285,4 +287,3 @@ $$(".tab").forEach((tab) => {
 });
 
 loadStats();
-

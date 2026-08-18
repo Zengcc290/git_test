@@ -19,7 +19,14 @@ from knowledge_search.embedding import (
 from knowledge_search.extractors import extract_document
 from knowledge_search.indexer import index_paths
 from knowledge_search.models import DocumentBlock
-from knowledge_search.vector_search import NumpyVectorIndex
+from knowledge_search.vector_search import NumpyVectorIndex, VectorIndex
+
+try:
+    import sqlite_vec  # noqa: F401
+except ImportError:  # pragma: no cover - exercised on minimal installations
+    SQLITE_VEC_AVAILABLE = False
+else:
+    SQLITE_VEC_AVAILABLE = True
 
 
 class FakeEmbeddingBackend:
@@ -198,6 +205,41 @@ class EmbeddingStorageTests(unittest.TestCase):
             self.assertAlmostEqual(results[0].score, 1.0)
             self.assertTrue(all(row["vector_dtype"] == "float32" for row in blobs))
             self.assertTrue(all(len(row["vector"]) == 8 for row in blobs))
+
+    @unittest.skipUnless(SQLITE_VEC_AVAILABLE, "sqlite-vec 未安装")
+    def test_sqlite_vec_retrieval_embeds_query_and_syncs_cached_vectors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "related.md").write_text("related content", encoding="utf-8")
+            (root / "unrelated.md").write_text("unrelated content", encoding="utf-8")
+            backend = FakeEmbeddingBackend()
+
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                stats = index_paths(
+                    knowledge_base,
+                    [root],
+                    chunk_size=200,
+                    overlap=0,
+                    embedding_backend=backend,
+                    min_chunk_chars=1,
+                    max_chunk_chars=200,
+                    max_chunk_tokens=10_000,
+                )
+                index = VectorIndex(knowledge_base, backend)
+                results = index.search("related", top_k=2)
+                table_count = knowledge_base.connection.execute(
+                    "SELECT COUNT(*) FROM embeddings_vec_1"
+                ).fetchone()[0]
+
+            self.assertEqual(stats.indexed, 2)
+            self.assertEqual(index.backend_name, "sqlite-vec")
+            self.assertEqual(table_count, 2)
+            self.assertEqual([result.filename for result in results], [
+                "related.md",
+                "unrelated.md",
+            ])
+            self.assertAlmostEqual(results[0].score, 1.0, places=5)
+            self.assertAlmostEqual(results[1].score, 0.0, places=5)
 
 
 class EmbeddingInputTests(unittest.TestCase):

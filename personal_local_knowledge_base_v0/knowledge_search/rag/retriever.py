@@ -3,78 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import combinations
 
+from ..chunking import ChunkingConfig, chunk_text
 from ..database import KnowledgeBase
-from ..models import SearchResult
-from ..tokenization import tokenize_for_search
 from ..embedding import EmbeddingBackend
-from ..vector_search import NumpyVectorIndex
-
-
-_QUESTION_STOPWORDS = {
-    "a",
-    "an",
-    "are",
-    "can",
-    "could",
-    "does",
-    "explain",
-    "how",
-    "is",
-    "please",
-    "the",
-    "what",
-    "why",
-    "介绍",
-    "报道",
-    "什么",
-    "作用",
-    "使用",
-    "可以",
-    "吗",
-    "呢",
-    "和",
-    "哪些",
-    "如何",
-    "怎么",
-    "怎样",
-    "是否",
-    "是",
-    "有",
-    "有什么",
-    "的",
-    "能否",
-    "请",
-    "请问",
-    "解释",
-    "为什么",
-    "与",
-    "区别",
-    "各",
-    "各赢",
-    "多少",
-    "多久",
-    "哪个",
-    "分别",
-    "情况",
-    "统计",
-    "赛后",
-    "最终",
-    "比赛",
-    "赛季",
-    "总结",
-    "提前",
-    "结束",
-    "发生",
-    "时候",
-    "做",
-    "场",
-    "类",
-    "词",
-    "他",
-    "又",
-}
+from ..models import SearchResult
+from ..vector_search import VectorIndex
 
 
 @dataclass(frozen=True)
@@ -146,8 +80,8 @@ class RetrievalResult:
         return len(self.context)
 
 
-class KeywordRetriever:
-    """Retrieve FTS5 results and fit them into a deterministic char budget."""
+class ChunkRetriever:
+    """Match question chunks to structured document chunks without jieba."""
 
     def __init__(
         self,
@@ -164,80 +98,32 @@ class KeywordRetriever:
         self.top_k = top_k
         self.max_context_chars = max_context_chars
 
-    @staticmethod
-    def _query_tokens(question: str) -> list[str]:
-        tokens: list[str] = []
-        seen: set[str] = set()
-        for token in tokenize_for_search(question):
-            normalized = token.casefold()
-            if normalized in _QUESTION_STOPWORDS or normalized in seen:
-                continue
-            if len(normalized) == 1 and not normalized.isdigit():
-                continue
-            seen.add(normalized)
-            tokens.append(token)
-        return tokens
-
     def _search(self, question: str) -> list[SearchResult]:
-        tokens = self._query_tokens(question)
-        if not tokens:
-            return []
-
-        results = self.knowledge_base.search(" ".join(tokens), limit=self.top_k)
-        if results or len(tokens) == 1:
-            return results
-
-        # The database uses precise AND matching. A long natural question often contains one
-        # unmatched descriptive word. Pair queries preserve entity co-occurrence,
-        # which is crucial in a large corpus where single common terms are noisy.
-        candidates: dict[int, dict[str, object]] = {}
-        search_tokens = tokens[:12]
-        pair_queries = combinations(search_tokens, 2)
-        for left, right in pair_queries:
-            for rank, result in enumerate(
-                self.knowledge_base.search(
-                    f'"{left}" "{right}"',
-                    limit=max(self.top_k, 10),
-                ),
-                start=1,
-            ):
-                candidate = candidates.setdefault(
-                    result.chunk_id,
-                    {"result": result, "pair_hits": 0, "rank_sum": 0},
-                )
-                candidate["pair_hits"] = int(candidate["pair_hits"]) + 1
-                candidate["rank_sum"] = int(candidate["rank_sum"]) + rank
-
-        # If no pair exists (for example a one-keyword question), retain the
-        # original single-token fallback behavior.
-        if not candidates:
-            for token in search_tokens:
-                for rank, result in enumerate(
-                    self.knowledge_base.search(token, limit=max(self.top_k, 10)),
-                    start=1,
-                ):
-                    candidate = candidates.setdefault(
-                        result.chunk_id,
-                        {"result": result, "pair_hits": 0, "rank_sum": 0},
-                    )
-                    candidate["rank_sum"] = int(candidate["rank_sum"]) + rank
-
-        def matched_token_count(candidate: dict[str, object]) -> int:
-            content = candidate["result"].content.casefold()
-            return sum(token.casefold() in content for token in search_tokens)
-
-        ranked = sorted(
-            candidates.values(),
-            key=lambda candidate: (
-                -matched_token_count(candidate),
-                -int(candidate["pair_hits"]),
-                int(candidate["rank_sum"]),
-                candidate["result"].score,
-                candidate["result"].document_path,
-                candidate["result"].chunk_index,
-            ),
+        config = ChunkingConfig()
+        question_chunks = chunk_text(
+            question,
+            chunk_size=config.core_chunk_chars,
+            overlap=config.overlap_chars,
         )
-        return [candidate["result"] for candidate in ranked[: self.top_k]]
+        candidates: dict[int, SearchResult] = {}
+        per_chunk_limit = max(self.top_k * 4, 20)
+        for question_chunk in question_chunks:
+            for result in self.knowledge_base.search_chunk_matches(
+                question_chunk.content,
+                limit=per_chunk_limit,
+            ):
+                previous = candidates.get(result.chunk_id)
+                if previous is None or result.score < previous.score:
+                    candidates[result.chunk_id] = result
+
+        return sorted(
+            candidates.values(),
+            key=lambda result: (
+                result.score,
+                result.document_path,
+                result.chunk_index,
+            ),
+        )[: self.top_k]
 
     def retrieve(self, question: str) -> RetrievalResult:
         if not question or not question.strip():
@@ -334,8 +220,8 @@ class KeywordRetriever:
         )
 
 
-class VectorRetriever(KeywordRetriever):
-    """Use Qwen3 + NumPy Top-K while reusing the citation/context builder."""
+class VectorRetriever(ChunkRetriever):
+    """Use query embeddings plus sqlite-vec, with a NumPy fallback."""
 
     def __init__(
         self,
@@ -351,10 +237,15 @@ class VectorRetriever(KeywordRetriever):
             top_k=top_k,
             max_context_chars=max_context_chars,
         )
-        self.vector_index = NumpyVectorIndex(knowledge_base, embedding_backend)
+        self.vector_index = VectorIndex(knowledge_base, embedding_backend)
         self.code = code
 
     def _search(self, question: str) -> list[SearchResult]:
         return self.vector_index.search(
             question, top_k=self.top_k, code=self.code
         )
+
+
+# Compatibility for callers written before question retrieval was separated
+# from the jieba-backed keyword search path.
+KeywordRetriever = ChunkRetriever

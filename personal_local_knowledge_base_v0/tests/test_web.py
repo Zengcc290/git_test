@@ -7,7 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 from knowledge_search.database import KnowledgeBase
+from knowledge_search.embedding import EmbeddingSettings
 from knowledge_search.indexer import index_paths
 from knowledge_search.rag.answer import RagConfig
 from knowledge_search.rag.llm_client import LLMResponse, TokenUsage
@@ -19,14 +22,17 @@ from knowledge_search.web.app import (
 )
 
 
-def _indexed_temp_db(text: str = "SQLite FTS5 提供本地全文搜索。"):
+def _indexed_temp_db(
+    text: str = "SQLite FTS5 提供本地全文搜索。",
+    embedding_backend=None,
+):
     temp_dir = tempfile.TemporaryDirectory()
     root = Path(temp_dir.name)
     source = root / "sqlite.md"
     source.write_text(text, encoding="utf-8")
     db_path = root / "knowledge.db"
     with KnowledgeBase(db_path) as knowledge_base:
-        index_paths(knowledge_base, [source])
+        index_paths(knowledge_base, [source], embedding_backend=embedding_backend)
     return temp_dir, root, db_path
 
 
@@ -36,6 +42,35 @@ class FakeClient:
             content="FTS5 是 SQLite 的全文搜索扩展。[1]",
             usage=TokenUsage(prompt_tokens=10, completion_tokens=8, total_tokens=18),
         )
+
+
+class FakeEmbeddingBackend:
+    settings = EmbeddingSettings(
+        model_name="fake/web",
+        model_revision="web-test",
+        dimension=2,
+        batch_size=8,
+    )
+
+    def __init__(self):
+        self.query_calls = []
+
+    @property
+    def model_revision(self):
+        return "web-test"
+
+    def embed_documents(self, texts):
+        return np.asarray(
+            [[1.0, 0.0] for _ in texts],
+            dtype=np.float32,
+        )
+
+    def embed_query(self, query, *, code=False):
+        self.query_calls.append((query, code))
+        return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    def token_count(self, text):
+        return len(text)
 
 
 class KnowledgeWebAppTests(unittest.TestCase):
@@ -82,6 +117,48 @@ class KnowledgeWebAppTests(unittest.TestCase):
             self.assertIn("[1]", result["answer"])
             self.assertEqual(result["usage"]["total_tokens"], 18)
             self.assertEqual(result["sources"][0]["filename"], "sqlite.md")
+        finally:
+            temp_dir.cleanup()
+
+    def test_semantic_search_uses_query_embedding_and_sqlite_vec(self):
+        try:
+            import sqlite_vec  # noqa: F401
+        except ImportError:
+            self.skipTest("sqlite-vec 未安装")
+        backend = FakeEmbeddingBackend()
+        temp_dir, root, db_path = _indexed_temp_db(embedding_backend=backend)
+        try:
+            app = KnowledgeWebApp(
+                db_path=db_path,
+                upload_dir=root / "uploads",
+                embedding_backend=backend,
+            )
+            stats = app.stats()
+            results = app.search("完全不同的语义问题")
+            self.assertEqual(stats["search_mode"], "semantic")
+            self.assertEqual(results[0]["filename"], "sqlite.md")
+            self.assertEqual(backend.query_calls, [("完全不同的语义问题", False)])
+        finally:
+            temp_dir.cleanup()
+
+    def test_semantic_ask_uses_query_embedding(self):
+        try:
+            import sqlite_vec  # noqa: F401
+        except ImportError:
+            self.skipTest("sqlite-vec 未安装")
+        backend = FakeEmbeddingBackend()
+        temp_dir, root, db_path = _indexed_temp_db(embedding_backend=backend)
+        try:
+            app = KnowledgeWebApp(
+                db_path=db_path,
+                upload_dir=root / "uploads",
+                client_factory=FakeClient,
+                embedding_backend=backend,
+            )
+            result = app.ask("不包含原文关键词的问题", RagConfig())
+            self.assertNotIn("error", result)
+            self.assertEqual(result["sources"][0]["filename"], "sqlite.md")
+            self.assertEqual(backend.query_calls, [("不包含原文关键词的问题", False)])
         finally:
             temp_dir.cleanup()
 
@@ -230,6 +307,38 @@ class HttpApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(answer["sources"][0]["filename"], "sqlite.md")
+
+    def test_http_semantic_mode_uses_embedding_backend(self):
+        backend = FakeEmbeddingBackend()
+        temp_dir, root, db_path = _indexed_temp_db(embedding_backend=backend)
+        app = KnowledgeWebApp(
+            db_path=db_path,
+            upload_dir=root / "uploads",
+            embedding_backend=backend,
+        )
+        server = create_server(app, lambda: RagConfig(), port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address
+            connection = http.client.HTTPConnection(host, port, timeout=5)
+            try:
+                connection.request(
+                    "GET",
+                    "/api/search?q=unrelated%20question&limit=1&mode=semantic",
+                )
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                connection.close()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload["results"][0]["filename"], "sqlite.md")
+            self.assertEqual(backend.query_calls, [("unrelated question", False)])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            temp_dir.cleanup()
 
     def test_multipart_upload_and_bad_json_are_rejected_cleanly(self):
         boundary = "----v3-boundary"

@@ -33,8 +33,8 @@ from .logging_config import configure_logging
 from .models import IndexProgress
 from .rag.answer import RagAnswerer, RagConfig
 from .rag.llm_client import LLMClient
-from .rag.retriever import KeywordRetriever, VectorRetriever
-from .vector_search import NumpyVectorIndex
+from .rag.retriever import ChunkRetriever, VectorRetriever
+from .vector_search import VectorIndex
 from .web.app import run_web
 
 
@@ -97,7 +97,12 @@ def _add_embedding_options(parser: argparse.ArgumentParser) -> None:
         help="远端接口协议；默认从 OpenAPI 自动探测",
     )
     parser.add_argument("--embedding-dimension", type=int, default=1024)
-    parser.add_argument("--embedding-batch-size", type=int, default=8)
+    parser.add_argument(
+        "--embedding-batch-size",
+        type=int,
+        default=16,
+        help="每次发给远端服务的文本数；P4 8GB 建议 16，可按实际长度调整",
+    )
     parser.add_argument("--embedding-timeout", type=float, default=120.0)
 
 
@@ -267,7 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--limit", type=int, default=10, help="最多返回条数（默认：10）")
     search_parser.add_argument("--no-color", action="store_true", help="不使用 ANSI 颜色，改用 [[...]] 标记")
     search_parser.add_argument(
-        "--vector", action="store_true", help="使用 Qwen3 + NumPy 向量 Top-K"
+        "--vector", action="store_true", help="使用查询 Embedding + sqlite-vec/NumPy 向量 Top-K"
     )
     search_parser.add_argument("--code-query", action="store_true")
     _add_embedding_options(search_parser)
@@ -361,6 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("uploads"),
         help="上传文件保存目录（默认：uploads）",
     )
+    _add_embedding_options(web_parser)
     _add_runtime_options(web_parser)
     return parser
 
@@ -516,6 +522,7 @@ def _run(args: argparse.Namespace) -> int:
             host=args.host,
             port=args.port,
             upload_dir=args.upload_dir,
+            embedding_backend=_embedding_backend(args),
         )
         return 0
 
@@ -560,6 +567,11 @@ def _run(args: argparse.Namespace) -> int:
                 if args.json_config is not None
                 else None
             )
+            if not args.embedding:
+                print(
+                    "警告：本次索引未启用 Embedding，将只建立关键词索引；"
+                    "可稍后运行 `knowledge_search embed` 补齐向量。"
+                )
             embedding_backend = _embedding_backend(args) if args.embedding else None
             stats = index_paths(
                 knowledge_base,
@@ -619,7 +631,7 @@ def _run(args: argparse.Namespace) -> int:
                     code=args.code_query,
                 )
             else:
-                retriever = KeywordRetriever(
+                retriever = ChunkRetriever(
                     knowledge_base,
                     top_k=config.top_k,
                     max_context_chars=config.max_context_chars,
@@ -635,7 +647,7 @@ def _run(args: argparse.Namespace) -> int:
         if args.command == "search":
             # 搜索模块返回已排序的结果对象。
             if args.vector:
-                results = NumpyVectorIndex(
+                results = VectorIndex(
                     knowledge_base, _embedding_backend(args)
                 ).search(
                     args.query,

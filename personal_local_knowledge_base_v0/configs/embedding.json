@@ -12,7 +12,7 @@
   "embedding_timeout_seconds": 120,
   "embedding_dimension": 1024,
   "vector_dtype": "float32",
-  "batch_size": 8,
+  "batch_size": 16,
   "normalize_embeddings": true,
   "query_instruction": "根据用户问题，从知识库中检索能够直接回答问题的相关文档片段"
 }

@@ -12,7 +12,7 @@
       <span class="brand-mark">KB</span>
       <div class="brand-text">
         <h1>个人知识库</h1>
-        <p>本地 SQLite FTS5 · 关键词检索 · 带引用问答</p>
+        <p>本地 SQLite · 语义检索 · 带引用问答</p>
       </div>
     </div>
     <nav class="tabs" role="tablist">
@@ -47,12 +47,12 @@
     <section class="content">
       <div class="panel is-active" id="panel-search" role="tabpanel">
         <div class="panel-head">
-          <h2>关键词搜索</h2>
-          <p>在已索引文档中查找匹配内容，支持中文分词与命中高亮。</p>
+          <h2>语义搜索</h2>
+          <p>使用 Embedding 理解问题，在已索引文档中查找相关内容。</p>
         </div>
         <form id="search-form" class="search-form" autocomplete="off">
           <div class="field-row">
-            <input id="search-q" type="text" placeholder="输入关键词，例如 SQLite 或 全文搜索" />
+            <input id="search-q" type="text" placeholder="输入问题，例如如何使用 SQLite 搜索？" />
             <button type="submit" class="btn btn-primary">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
               搜索
@@ -65,7 +65,7 @@
       <div class="panel" id="panel-ask" role="tabpanel" hidden>
         <div class="panel-head">
           <h2>文档问答</h2>
-          <p>检索相关内容后交给大模型生成带引用的答案。未命中资料时会明确拒答。</p>
+          <p>使用语义检索找到相关内容后生成带引用的答案。未命中资料时会明确拒答。</p>
         </div>
         <form id="ask-form" autocomplete="off">
           <textarea id="ask-q" rows="4" placeholder="例如：SQLite FTS5 是什么？"></textarea>

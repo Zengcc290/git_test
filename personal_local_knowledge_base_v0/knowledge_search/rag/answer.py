@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .llm_client import LLMClient, LLMClientError, TokenUsage
 from .prompt import REFUSAL_ANSWER, REFUSAL_PREFIX, build_messages
-from .retriever import KeywordRetriever, RetrievedChunk
+from .retriever import ChunkRetriever, RetrievedChunk
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class RagAnswerer:
 
     def __init__(
         self,
-        retriever: KeywordRetriever,
+        retriever: ChunkRetriever,
         *,
         temperature: float = 0.0,
         client_factory: Callable[[], LLMClient] = LLMClient.from_env,
@@ -212,7 +212,7 @@ class RagAnswerer:
                 "total_tokens": result.usage.total_tokens,
             },
         }
-        logger.info("RAG_RECORD %s", json.dumps(record, ensure_ascii=False))
+        #logger.info("RAG_RECORD %s", json.dumps(record, ensure_ascii=False))
 
     def _log_failure(
         self,

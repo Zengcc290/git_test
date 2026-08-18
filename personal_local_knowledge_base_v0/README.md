@@ -1,10 +1,10 @@
 # 个人本地知识库搜索工具 V4
 
-这是一个本地文档搜索和基础 RAG 问答工具。它把 `.txt`、`.md`、PDF、`.pptx`、配置化 `.json`、Python 和 C/C++ 内容解析为结构块后导入 SQLite，使用 SQLite FTS5 检索相关分段，再把有长度限制的原文上下文交给 OpenAI 兼容的大模型生成带引用的答案。
+这是一个本地文档搜索和基础 RAG 问答工具。它把 `.txt`、`.md`、PDF、`.pptx`、配置化 `.json`、Python 和 C/C++ 内容解析为结构块后导入 SQLite，使用 Embedding + sqlite-vec 检索相关分段，再把有长度限制的原文上下文交给 OpenAI 兼容的大模型生成带引用的答案。
 
-## V3 网页界面
+## 网页界面
 
-V3 在现有 FTS5 + RAG 链路上增加了无需第三方 Web 框架的本地网页服务。先安装依赖，再启动：
+网页服务默认使用 Embedding 查询向量和 sqlite-vec KNN；先确保 Embedding 服务已启动，再安装依赖并启动：
 
 ```powershell
 .\.venv\Scripts\python.exe -m knowledge_search web
@@ -12,8 +12,8 @@ V3 在现有 FTS5 + RAG 链路上增加了无需第三方 Web 框架的本地网
 
 浏览器打开 <http://127.0.0.1:8000/>。页面包含搜索、问答、导入和文档管理四个视图：
 
-- 搜索：关键词检索、FTS5 排序和命中高亮。
-- 问答：复用关键词 RAG，展示答案、耗时、token 和实际引用来源；无资料时拒答。
+- 搜索：语义向量检索、余弦排序和命中高亮。
+- 问答：使用查询向量召回结构化原文分段，展示答案、耗时、token 和实际引用来源。
 - 导入：上传 TXT/Markdown/PDF/PPTX/JSON/Python/C/C++，或提交本机目录批量索引。
 - 文档：查看元数据并删除文档及其 FTS5 分段。
 
@@ -22,6 +22,17 @@ V3 在现有 FTS5 + RAG 链路上增加了无需第三方 Web 框架的本地网
 ```powershell
 .\.venv\Scripts\python.exe -m knowledge_search web --port 9000 --db .\data\knowledge.db --upload-dir .\uploads
 ```
+
+若 Embedding 服务不在默认地址 `http://127.0.0.1:8000`，启动 Web 时传入同样的连接参数：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_search web `
+  --db .\data\knowledge.db `
+  --embedding-base-url http://127.0.0.1:8000 `
+  --embedding-revision 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+```
+
+Web 搜索和问答默认使用语义向量检索；API 仍可用 `mode=keyword` 显式切回关键词检索。
 
 浏览器到 API 再到 SQLite/RAG 的数据流、逐模块代码讲解见 [`docs/v3-code-walkthrough.md`](docs/v3-code-walkthrough.md)，十条网页问答验收记录见 [`docs/v3-web-acceptance.md`](docs/v3-web-acceptance.md)。
 
@@ -40,7 +51,7 @@ V3 在现有 FTS5 + RAG 链路上增加了无需第三方 Web 框架的本地网
 - 目录排除规则、最大文件数限制和超大 JSON 大小保护
 - 索引过程中显示当前文件和总进度
 - 命令行查询、结果排序、路径/分段信息和命中高亮
-- 基于现有 FTS5 的 Top-K 关键词 RAG 问答
+- 基于原文 chunk 连续片段匹配的 Top-K RAG 问答
 - 严格上下文 Prompt、无资料拒答、文件与分段引用
 - OpenAI 兼容 API、响应时间及 token 使用量记录
 - 控制台日志、文件日志、单文件异常隔离
@@ -62,7 +73,7 @@ V3 在现有 FTS5 + RAG 链路上增加了无需第三方 Web 框架的本地网
 
 ## 语义分块与 Embedding
 
-正式语义链路只使用 `Qwen/Qwen3-Embedding-0.6B`。默认参数在 [`configs/embedding.json`](configs/embedding.json)：800 字符无重叠核心块、200 字符最终重叠、200/1600 字符最小/最大长度、0.80 合并阈值、1024 维 float32、L2 归一化和 batch size 8。
+正式语义链路只使用 `Qwen/Qwen3-Embedding-0.6B`。默认参数在 [`configs/embedding.json`](configs/embedding.json)：800 字符无重叠核心块、200 字符最终重叠、200/1600 字符最小/最大长度、0.80 合并阈值、1024 维 float32、L2 归一化和 batch size 16。
 
 分块顺序固定为：结构块 -> 无重叠核心块 -> 核心向量 -> 相邻核心块语义合并 -> 最终边界加重叠 -> 最终文本重新向量化。标题、JSON 记录、代码函数/类、PDF 页和 PPT 幻灯片等硬边界优先级高于语义和长度，任何相似度都不能跨越硬边界。
 
@@ -75,7 +86,32 @@ Embedding 模型运行在远端服务器，本项目不安装 PyTorch 或下载�
   --embedding-base-url http://127.0.0.1:8000
 ```
 
-客户端会优先从 `/v1/models` 读取实际 Hugging Face revision 并写入 `embedding_models`。当前 `/embed` 服务不提供 revision，因此必须用 `--embedding-revision <commit-hash>` 或 `EMBEDDING_MODEL_REVISION` 明确传入远端实际版本。地址也可通过 `EMBEDDING_BASE_URL` 配置；服务需要鉴权时使用 `EMBEDDING_API_KEY`，不要把密钥写进命令行。已有 Chunk 只需补齐或更换向量时，不会重新解析源文件：
+客户端会优先从 `/v1/models` 读取实际 Hugging Face revision 并写入 `embedding_models`；没有该元数据的旧 `/embed` 服务才需要 `--embedding-revision <commit-hash>` 或 `EMBEDDING_MODEL_REVISION`。地址也可通过 `EMBEDDING_BASE_URL` 配置；服务需要鉴权时使用 `EMBEDDING_API_KEY`，不要把密钥写进命令行。已有 Chunk 只需补齐或更换向量时，不会重新解析源文件：
+
+### P4 服务器部署
+
+Tesla P4 是 Pascal（计算能力 6.1、8GB、没有 Tensor Core）。不要在这张卡上使用要求计算能力 7.0+ 的 vLLM/FlashAttention wheel；项目提供了兼容 P4 的 Transformers 服务端：
+
+```bash
+cd personal_local_knowledge_base_v0
+python3 -m venv .venv-server
+.venv-server/bin/pip install -r requirements-server.txt
+.venv-server/bin/python scripts/qwen_embedding_server.py \
+  --model Qwen/Qwen3-Embedding-0.6B \
+  --host 0.0.0.0 --port 8000 \
+  --max-batch-size 16 --max-batch-tokens 8192 \
+  --max-length 2048 --batch-wait-ms 3
+```
+
+服务只启动一个 worker，模型只在显卡上加载一次；多个请求会在 3ms 窗口内合并为微批，避免并发请求复制模型或让 GPU 空转。2048 token 覆盖当前最大 1600 字符分块；需要处理真正的长文本时可改成 `--max-length 8192`，但应同步降低 `--max-batch-tokens`。`--max-batch-tokens 8192` 是 8GB P4 的保守上限，若 `nvidia-smi` 显示显存仍有余量，可逐步调到 12288；发生 OOM 时先降到 4096。客户端索引批大小应与服务端一致：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_search index .\my-docs `
+  --embedding --embedding-batch-size 16 `
+  --embedding-base-url http://127.0.0.1:8000
+```
+
+服务同时提供 `/embed`、`/v1/embeddings`、`/v1/models` 和 `/tokenize`，因此无需修改现有缓存、revision 校验和查询代码。
 
 ```powershell
 .\.venv\Scripts\python.exe -m knowledge_search embed
@@ -83,7 +119,7 @@ Embedding 模型运行在远端服务器，本项目不安装 PyTorch 或下载�
 .\.venv\Scripts\python.exe -m knowledge_search ask "如何替换已有文档" --vector
 ```
 
-`embeddings` 按 Chunk、模型 revision、维度、输入模板、内容摘要和分块指纹增量缓存。查询向量使用固定指令并归一化，文档向量按模型配置首次加载到内存；向量新增、删除或更新后缓存自动失效。未启用 `--embedding` 的旧索引仍可继续使用 FTS5 关键词检索。
+`embeddings` 按 Chunk、模型 revision、维度、输入模板、内容摘要和分块指纹增量缓存。查询时会调用同一个 Embedding 服务生成用户问题向量；向量检索优先使用 `sqlite-vec` 的 SQLite KNN 索引，将归一化向量的距离转换为余弦相似度，并在扩展不可用时自动回退到 NumPy。向量新增、删除或更新后 sqlite-vec 派生表会自动同步。未启用 `--embedding` 的旧索引仍可继续使用 FTS5 关键词检索。
 
 ## 环境准备
 
@@ -186,6 +222,16 @@ sample_documents/        可直接运行的示例文档
 data/                    数据库目录（数据库文件被 git 忽略）
 docs/experiment-log.md   实验记录
 ```
+
+## 代码函数语义索引
+
+仓库附带一份面向个人知识库导入的代码标注：
+
+- [`docs/code-function-index.jsonl`](docs/code-function-index.jsonl)：一行一个文件、类、命名函数、Python `lambda` 或 JavaScript 箭头回调。字段包含 `file`、`symbol`、`line_start`/`line_end`、`signature`、`purpose`、`details`、`calls`、`returns`、`raises`、`control_flow`、`side_effects` 和 `keywords`，适合 JSONL/结构化导入、向量化和过滤检索。
+- [`docs/code-function-index.md`](docs/code-function-index.md)：同一批记录的人工浏览版本，按文件和符号分层，适合先阅读再导入。
+- [`scripts/generate_code_index.py`](scripts/generate_code_index.py)：使用 Python AST 和 JavaScript 平衡括号扫描器重新生成两份索引。源码变更后，在项目目录运行 `python scripts/generate_code_index.py`；生成时会重新计算行号和函数覆盖范围。
+
+建议知识库把 `entity_id` 作为稳定主键，把 `file`、`symbol`、`keywords` 设为可过滤字段；提问时可使用“文件路径 + 函数名 + 作用/调用/副作用”等组合条件快速定位实现。该索引只描述源码，不会执行被分析的业务代码。
 
 ## 运行测试
 
@@ -381,4 +427,4 @@ CLI 会独立列出实际传给模型的来源，便于人工核对。10 条实�
 
 ## 当前范围与限制
 
-V4 仍是无会话 RAG，不做 Agent、远程向量数据库、重排模型或流式输出。第一版向量检索固定为远端 Qwen3-Embedding-0.6B 推理服务 + 本地 SQLite + NumPy；本机不加载模型，暂不引入 FAISS、Qdrant、sqlite-vec 或 Milvus。程序能保证回答至少引用本次检索来源且不含越界引用，但引用格式合法不等于每句话在语义上都被来源支持，因此仍需结合逐事实评估检查幻觉。PDF 仅支持有文本层的文件，扫描版 PDF 暂不做 OCR；PPTX 不处理图片或图表内部文字。C/C++ 第一版使用容错声明和大括号解析，不等同于完整编译器语法树。
+V4 仍是无会话 RAG，不做 Agent、远程向量数据库、重排模型或流式输出。向量检索使用远端 Qwen3-Embedding-0.6B 推理服务 + 本地 SQLite；安装 `sqlite-vec` 时使用 SQLite KNN，扩展不可用时回退 NumPy。本机不加载 Embedding 模型。程序能保证回答至少引用本次检索来源且不含越界引用，但引用格式合法不等于每句话在语义上都被来源支持，因此仍需结合逐事实评估检查幻觉。PDF 仅支持有文本层的文件，扫描版 PDF 暂不做 OCR；PPTX 不处理图片或图表内部文字。C/C++ 第一版使用容错声明和大括号解析，不等同于完整编译器语法树。

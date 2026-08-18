@@ -4,11 +4,12 @@ The server deliberately uses ``http.server`` rather than a third-party web
 framework so the "complete version" runs with only the project's existing
 dependencies. It presents a small JSON API consumed by the bundled
 single-page interface and reuses the same ``KnowledgeBase``, ``index_paths``,
-``KeywordRetriever`` and ``RagAnswerer`` objects as the command line.
+``VectorRetriever`` and ``RagAnswerer`` objects as the command line.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import mimetypes
@@ -22,12 +23,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..database import KnowledgeBase
+from ..embedding import EmbeddingBackend
 from ..extractors import SUPPORTED_SUFFIXES
 from ..indexer import index_paths
 from ..rag.answer import RagAnswerer, RagConfig
 from ..rag.llm_client import LLMClient, LLMClientError
-from ..rag.retriever import KeywordRetriever
+from ..rag.retriever import ChunkRetriever, VectorRetriever
 from ..rag.prompt import REFUSAL_ANSWER
+from ..vector_search import VectorIndex
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,12 @@ _MAX_INDEX_PATHS = 100
 _MAX_QUESTION_CHARS = 10_000
 _MAX_CHUNK_SIZE = 100_000
 _MAX_CONTEXT_CHARS = 100_000
+
+
+class _ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    """Bind exclusively so a second server cannot reuse the port on Windows."""
+
+    allow_reuse_address = False
 
 
 def _search_result_location(result: Any) -> str:
@@ -87,10 +96,12 @@ class KnowledgeWebApp:
         db_path: Path,
         upload_dir: Path = DEFAULT_UPLOAD_DIR,
         client_factory: Callable[[], LLMClient] = LLMClient.from_env,
+        embedding_backend: EmbeddingBackend | None = None,
     ) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
         self.upload_dir = Path(upload_dir).expanduser().resolve()
         self.client_factory = client_factory
+        self.embedding_backend = embedding_backend
         self._lock = threading.RLock()
 
     def open(self) -> KnowledgeBase:
@@ -107,6 +118,9 @@ class KnowledgeWebApp:
                     "database": str(knowledge_base.db_path),
                     "documents": knowledge_base.document_count(),
                     "chunks": knowledge_base.chunk_count(),
+                    "search_mode": (
+                        "semantic" if self.embedding_backend is not None else "keyword"
+                    ),
                 }
 
     def documents(self) -> list[dict[str, Any]]:
@@ -126,15 +140,31 @@ class KnowledgeWebApp:
                     for document in knowledge_base.list_documents()
                 ]
 
-    def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        semantic: bool | None = None,
+    ) -> list[dict[str, Any]]:
         query = str(query).strip()
         if not query:
             return []
         if limit <= 0 or limit > _MAX_SEARCH_LIMIT:
             raise ValueError(f"搜索条数必须在 1 到 {_MAX_SEARCH_LIMIT} 之间。")
+        use_semantic = (
+            self.embedding_backend is not None if semantic is None else semantic
+        )
         with self._lock:
             with self.open() as knowledge_base:
-                results = knowledge_base.search(query, limit=limit)
+                if use_semantic:
+                    if self.embedding_backend is None:
+                        raise ValueError("语义检索未配置 Embedding 服务。")
+                    results = VectorIndex(
+                        knowledge_base, self.embedding_backend
+                    ).search(query, top_k=limit)
+                else:
+                    results = knowledge_base.search(query, limit=limit)
         return [
             {
                 "filename": result.filename,
@@ -161,19 +191,38 @@ class KnowledgeWebApp:
             for result in results
         ]
 
-    def ask(self, question: str, config: RagConfig) -> dict[str, Any]:
+    def ask(
+        self,
+        question: str,
+        config: RagConfig,
+        *,
+        semantic: bool | None = None,
+    ) -> dict[str, Any]:
         question = str(question).strip()
         if not question:
             raise ValueError("问题不能为空。")
         if len(question) > _MAX_QUESTION_CHARS:
             raise ValueError(f"问题不能超过 {_MAX_QUESTION_CHARS} 个字符。")
+        use_semantic = (
+            self.embedding_backend is not None if semantic is None else semantic
+        )
         with self._lock:
             with self.open() as knowledge_base:
-                retriever = KeywordRetriever(
-                    knowledge_base,
-                    top_k=config.top_k,
-                    max_context_chars=config.max_context_chars,
-                )
+                if use_semantic:
+                    if self.embedding_backend is None:
+                        raise ValueError("语义检索未配置 Embedding 服务。")
+                    retriever = VectorRetriever(
+                        knowledge_base,
+                        self.embedding_backend,
+                        top_k=config.top_k,
+                        max_context_chars=config.max_context_chars,
+                    )
+                else:
+                    retriever = ChunkRetriever(
+                        knowledge_base,
+                        top_k=config.top_k,
+                        max_context_chars=config.max_context_chars,
+                    )
                 answerer = RagAnswerer(
                     retriever,
                     temperature=config.temperature,
@@ -241,6 +290,7 @@ class KnowledgeWebApp:
                     paths,
                     chunk_size=chunk_size,
                     overlap=overlap,
+                    embedding_backend=self.embedding_backend,
                 )
         return {
             "files_found": stats.files_found,
@@ -420,7 +470,16 @@ class KnowledgeRequestHandler(BaseHTTPRequestHandler):
                     limit = int((query.get("limit") or ["10"])[0])
                 except (TypeError, ValueError) as exc:
                     raise ValueError("limit 必须是整数。") from exc
-                self._send_json({"results": self.app.search(term, limit=limit)})
+                mode = (query.get("mode") or [None])[0]
+                self._send_json(
+                    {
+                        "results": self.app.search(
+                            term,
+                            limit=limit,
+                            semantic=_semantic_option({"mode": mode}),
+                        )
+                    }
+                )
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
         except (OSError, ValueError, RuntimeError) as exc:
@@ -435,7 +494,15 @@ class KnowledgeRequestHandler(BaseHTTPRequestHandler):
                 payload = self._read_json_object()
                 term = str(payload.get("q", "")).strip()
                 limit = int(payload.get("limit", 10))
-                self._send_json({"results": self.app.search(term, limit=limit)})
+                self._send_json(
+                    {
+                        "results": self.app.search(
+                            term,
+                            limit=limit,
+                            semantic=_semantic_option(payload),
+                        )
+                    }
+                )
                 return
             if route == "/api/ask":
                 payload = self._read_json_object()
@@ -443,7 +510,13 @@ class KnowledgeRequestHandler(BaseHTTPRequestHandler):
                 if not question:
                     raise ValueError("问题不能为空。")
                 config = self._config_from(payload, self.rag_config)
-                self._send_json(self.app.ask(question, config))
+                self._send_json(
+                    self.app.ask(
+                        question,
+                        config,
+                        semantic=_semantic_option(payload),
+                    )
+                )
                 return
             if route == "/api/index":
                 payload = self._read_json_object()
@@ -579,6 +652,19 @@ def _extract_quoted(header: str, key: str) -> str:
     return (bare or "").strip()
 
 
+def _semantic_option(payload: dict[str, Any]) -> bool | None:
+    """Parse the optional retrieval mode without breaking old API clients."""
+
+    mode = payload.get("mode")
+    if mode is None or mode == "":
+        return None
+    if mode in {"semantic", "vector"}:
+        return True
+    if mode in {"keyword", "fts"}:
+        return False
+    raise ValueError("mode 必须是 semantic、vector 或 keyword。")
+
+
 def create_server(
     app: KnowledgeWebApp,
     rag_config: Callable[[], RagConfig],
@@ -586,7 +672,7 @@ def create_server(
     port: int = 8000,
 ) -> ThreadingHTTPServer:
     handler = KnowledgeRequestHandler
-    server = ThreadingHTTPServer((host, port), handler)
+    server = _ExclusiveThreadingHTTPServer((host, port), handler)
     server.app = app  # type: ignore[attr-defined]
     server.rag_config = rag_config  # type: ignore[attr-defined]
     return server
@@ -598,9 +684,14 @@ def run_web(
     host: str = "127.0.0.1",
     port: int = 8000,
     upload_dir: Path = DEFAULT_UPLOAD_DIR,
+    embedding_backend: EmbeddingBackend | None = None,
 ) -> None:
     """Start the blocking web server for CLI use."""
-    app = KnowledgeWebApp(db_path=db_path, upload_dir=upload_dir)
+    app = KnowledgeWebApp(
+        db_path=db_path,
+        upload_dir=upload_dir,
+        embedding_backend=embedding_backend,
+    )
     rag_config_path = Path("configs/rag.json")
     if not rag_config_path.exists():
         rag_config_path = Path(__file__).resolve().parents[2] / "configs" / "rag.json"
@@ -610,7 +701,12 @@ def run_web(
             return RagConfig.from_file(rag_config_path)
         return RagConfig()
 
-    server = create_server(app, load_config, host=host, port=port)
+    try:
+        server = create_server(app, load_config, host=host, port=port)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048:
+            raise RuntimeError(f"端口 {port} 已被占用，Web 服务未启动。") from None
+        raise
     logger.info("知识库网页已启动：http://%s:%s/", host, port)
     try:
         server.serve_forever()

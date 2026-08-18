@@ -251,12 +251,18 @@ class RemoteQwen3EmbeddingModel:
         if self.settings.model_revision:
             self._resolved_revision = self.settings.model_revision
             return self._resolved_revision
-        if self._service_protocol() == "simple":
-            raise RemoteEmbeddingError(
-                "远端 /embed 服务不报告模型 revision；请通过 "
-                "--embedding-revision 或 EMBEDDING_MODEL_REVISION 传入实际 commit hash"
-            )
-        payload = self._request_json("/v1/models")
+        # A service may expose the lightweight /embed endpoint while also
+        # publishing standard model metadata. Use that metadata when present;
+        # only legacy simple servers need an explicit revision override.
+        try:
+            payload = self._request_json("/v1/models")
+        except RemoteEmbeddingError:
+            if self._service_protocol() == "simple":
+                raise RemoteEmbeddingError(
+                    "远端 /embed 服务不报告模型 revision；请通过 "
+                    "--embedding-revision 或 EMBEDDING_MODEL_REVISION 传入实际 commit hash"
+                )
+            raise
         models = payload.get("data", [])
         if isinstance(models, list):
             for item in models:
