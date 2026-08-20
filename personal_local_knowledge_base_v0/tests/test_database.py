@@ -9,6 +9,68 @@ from knowledge_search.models import Chunk, ExtractedDocument
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_schema_compatibility_is_read_only_after_migration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with KnowledgeBase(Path(temp_dir) / "knowledge.db") as knowledge_base:
+                statements = []
+                knowledge_base.connection.set_trace_callback(statements.append)
+                migrated = knowledge_base._ensure_schema_compatibility()
+                knowledge_base.connection.set_trace_callback(None)
+
+        self.assertFalse(migrated)
+        self.assertFalse(
+            any(
+                statement.lstrip().upper().startswith("UPDATE CHUNKS")
+                for statement in statements
+            )
+        )
+
+    def test_document_transaction_rolls_back_and_can_be_resumed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large.md"
+            old_document = ExtractedDocument(
+                path=source,
+                file_type="md",
+                text="committed old content",
+                sha256="old-hash",
+                size=21,
+                modified_ns=1,
+            )
+            new_document = ExtractedDocument(
+                path=source,
+                file_type="md",
+                text="replacement content",
+                sha256="new-hash",
+                size=19,
+                modified_ns=2,
+            )
+
+            def interrupted_chunks():
+                yield Chunk(0, "uncommitted first chunk")
+                raise ConnectionResetError("embedding tunnel interrupted")
+
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                knowledge_base.replace_document(
+                    old_document,
+                    [Chunk(0, "committed old content")],
+                )
+                with self.assertRaises(ConnectionResetError):
+                    knowledge_base.replace_document(
+                        new_document,
+                        interrupted_chunks(),
+                    )
+
+                self.assertTrue(knowledge_base.search("committed old"))
+                self.assertFalse(knowledge_base.search("uncommitted first"))
+
+                knowledge_base.replace_document(
+                    new_document,
+                    [Chunk(0, "replacement content")],
+                )
+                self.assertTrue(knowledge_base.search("replacement"))
+                self.assertFalse(knowledge_base.search("committed old"))
+
     def test_chunk_window_returns_neighbors_from_same_document(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

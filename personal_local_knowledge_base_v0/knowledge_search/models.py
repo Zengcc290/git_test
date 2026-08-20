@@ -172,6 +172,18 @@ class IndexProgress:
     path: Path
     # ``processing``、``indexed``、``skipped``、``empty``、``oversized`` 或 ``failed``。
     status: str
+    # 本次任务当前估计会产生的分块数。分块器可能执行语义合并，因此该值会动态修正。
+    estimated_chunks: int = 0
+    # 已经完成生成/写入流程的分块数。
+    completed_chunks: int = 0
+    # 从本次索引任务开始计算的经过秒数。
+    elapsed_seconds: float = 0.0
+    # 按当前分块速率估计的剩余秒数；无法估计时为 None。
+    estimated_remaining_seconds: float | None = None
+    # 按当前速率动态计算的预计完成时间（本地时区 ISO-8601）。
+    estimated_completion_time: str | None = None
+    # 最近一个观测窗口的平均分块速率。
+    chunks_per_second: float = 0.0
 
 
 @dataclass
@@ -190,3 +202,9 @@ class IndexStats:
     oversized: int = 0
     # 新生成或因缓存失效而重建的向量数量。
     embeddings_generated: int = 0
+    # 索引任务结束时的动态分块统计。
+    estimated_chunks: int = 0
+    completed_chunks: int = 0
+    elapsed_seconds: float = 0.0
+    estimated_remaining_seconds: float | None = None
+    estimated_completion_time: str | None = None

@@ -8,10 +8,15 @@ from pathlib import Path
 
 import numpy as np
 
-from knowledge_search.chunking import ChunkingConfig, iter_chunk_blocks
+from knowledge_search.chunking import (
+    ChunkingConfig,
+    iter_chunk_blocks,
+    iter_chunk_blocks_batched,
+)
 from knowledge_search.database import KnowledgeBase
 from knowledge_search.embedding import (
     EmbeddingSettings,
+    RemoteEmbeddingError,
     RemoteQwen3EmbeddingModel,
     build_document_embedding_input,
     build_query_embedding_input,
@@ -98,6 +103,67 @@ class SemanticChunkingTests(unittest.TestCase):
             chunk.embedding_content for chunk in chunks
         ])
         self.assertTrue(all(chunk.embedding_vector == (1.0, 0.0) for chunk in chunks))
+
+    def test_batched_chunking_preserves_semantic_merge_across_batch_boundary(self):
+        backend_old = FakeEmbeddingBackend()
+        backend_new = FakeEmbeddingBackend()
+        source = [block("abcdefghij" * 3)]
+
+        old_chunks = list(
+            iter_chunk_blocks(
+                source,
+                chunk_size=10,
+                overlap=3,
+                min_chunk_chars=2,
+                max_chunk_chars=20,
+                max_chunk_tokens=10_000,
+                embedding_backend=backend_old,
+            )
+        )
+        new_chunks = list(
+            iter_chunk_blocks_batched(
+                source,
+                chunk_size=10,
+                overlap=3,
+                min_chunk_chars=2,
+                max_chunk_chars=20,
+                max_chunk_tokens=10_000,
+                embedding_backend=backend_new,
+            )
+        )
+
+        self.assertEqual(
+            [(chunk.content, chunk.embedding_content) for chunk in new_chunks],
+            [(chunk.content, chunk.embedding_content) for chunk in old_chunks],
+        )
+        self.assertEqual(
+            [chunk.embedding_vector for chunk in new_chunks],
+            [chunk.embedding_vector for chunk in old_chunks],
+        )
+
+    def test_batched_chunking_preserves_merge_between_blocks(self):
+        backend_old = FakeEmbeddingBackend()
+        backend_new = FakeEmbeddingBackend()
+        source = [
+            block("abcdefghij", block_id="a"),
+            block("klmnopqrst", block_id="b"),
+            block("uvwxyzabcd", block_id="c"),
+        ]
+        kwargs = dict(
+            chunk_size=10,
+            overlap=0,
+            min_chunk_chars=1,
+            max_chunk_chars=20,
+            max_chunk_tokens=10_000,
+        )
+        old_chunks = list(iter_chunk_blocks(source, embedding_backend=backend_old, **kwargs))
+        new_chunks = list(
+            iter_chunk_blocks_batched(source, embedding_backend=backend_new, **kwargs)
+        )
+        self.assertEqual(
+            [chunk.content for chunk in new_chunks],
+            [chunk.content for chunk in old_chunks],
+        )
 
     def test_hard_boundary_prevents_merge_and_overlap(self):
         backend = FakeEmbeddingBackend()
@@ -314,6 +380,154 @@ class _EmbeddingHandler(BaseHTTPRequestHandler):
 
 
 class RemoteEmbeddingTests(unittest.TestCase):
+    def test_retries_temporary_http_failures_then_succeeds(self):
+        class TemporaryFailureHandler(_EmbeddingHandler):
+            request_count = 0
+
+            def do_POST(self):
+                type(self).request_count += 1
+                if type(self).request_count <= 2:
+                    self.send_response(503)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"temporarily unavailable"}')
+                    return
+                super().do_POST()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), TemporaryFailureHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            backend = RemoteQwen3EmbeddingModel(
+                EmbeddingSettings(
+                    model_revision="abc1234", dimension=2, batch_size=1
+                ),
+                base_url=f"http://127.0.0.1:{server.server_port}",
+                protocol="openai",
+                max_retries=5,
+                retry_delay=0,
+            )
+            vectors = backend.embed_documents(["one"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(TemporaryFailureHandler.request_count, 3)
+        self.assertTrue(np.allclose(vectors, [[0.6, 0.8]]))
+
+    def test_temporary_failure_stops_after_five_retries(self):
+        class AlwaysUnavailableHandler(_EmbeddingHandler):
+            request_count = 0
+
+            def do_POST(self):
+                type(self).request_count += 1
+                self.send_response(503)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), AlwaysUnavailableHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            backend = RemoteQwen3EmbeddingModel(
+                EmbeddingSettings(
+                    model_revision="abc1234", dimension=2, batch_size=1
+                ),
+                base_url=f"http://127.0.0.1:{server.server_port}",
+                protocol="openai",
+                max_retries=5,
+                retry_delay=0,
+            )
+            with self.assertRaises(RemoteEmbeddingError) as raised:
+                backend.embed_documents(["one"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(AlwaysUnavailableHandler.request_count, 6)
+        self.assertTrue(raised.exception.retryable)
+
+    def test_does_not_retry_permanent_http_failure(self):
+        class PermanentFailureHandler(_EmbeddingHandler):
+            request_count = 0
+
+            def do_POST(self):
+                type(self).request_count += 1
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"bad dimensions"}')
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), PermanentFailureHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            backend = RemoteQwen3EmbeddingModel(
+                EmbeddingSettings(
+                    model_revision="abc1234", dimension=2, batch_size=1
+                ),
+                base_url=f"http://127.0.0.1:{server.server_port}",
+                protocol="openai",
+                max_retries=5,
+                retry_delay=0,
+            )
+            with self.assertRaises(RemoteEmbeddingError) as raised:
+                backend.embed_documents(["one"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.assertEqual(PermanentFailureHandler.request_count, 1)
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertFalse(raised.exception.retryable)
+
+    def test_does_not_retry_invalid_json_or_dimension_mismatch(self):
+        class InvalidResponseHandler(_EmbeddingHandler):
+            request_count = 0
+            response_mode = "json"
+
+            def do_POST(self):
+                type(self).request_count += 1
+                if type(self).response_mode == "json":
+                    body = b"not-json"
+                else:
+                    body = json.dumps(
+                        {"data": [{"index": 0, "embedding": [1.0]}]}
+                    ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), InvalidResponseHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            backend = RemoteQwen3EmbeddingModel(
+                EmbeddingSettings(
+                    model_revision="abc1234", dimension=2, batch_size=1
+                ),
+                base_url=f"http://127.0.0.1:{server.server_port}",
+                protocol="openai",
+                max_retries=5,
+                retry_delay=0,
+            )
+            with self.assertRaises(RemoteEmbeddingError):
+                backend.embed_documents(["one"])
+            self.assertEqual(InvalidResponseHandler.request_count, 1)
+
+            InvalidResponseHandler.response_mode = "dimension"
+            with self.assertRaises(ValueError):
+                backend.embed_documents(["one"])
+            self.assertEqual(InvalidResponseHandler.request_count, 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_openai_compatible_remote_service_is_batched_and_normalized(self):
         _EmbeddingHandler.embedding_inputs = []
         server = ThreadingHTTPServer(("127.0.0.1", 0), _EmbeddingHandler)

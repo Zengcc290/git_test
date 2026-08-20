@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from knowledge_search.cli import build_parser, main
+from knowledge_search.database import KnowledgeBase
 
 
 def _reset_logging_handlers() -> None:
@@ -18,6 +19,73 @@ def _reset_logging_handlers() -> None:
 
 
 class CLIIntegrationTests(unittest.TestCase):
+    def test_dataset_index_command_auto_detects_adapter(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "items.parquet"
+            database_path = root / "knowledge.db"
+            source.write_text(
+                '{"anchor":"query","positive":"CLI auto dataset body"}\n',
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(output):
+                    status = main(
+                        [
+                            "index",
+                            str(source),
+                            "--db",
+                            str(database_path),
+                            "--log-file",
+                            str(root / "app.log"),
+                        ]
+                    )
+            finally:
+                _reset_logging_handlers()
+
+            with KnowledgeBase(database_path) as knowledge_base:
+                results = knowledge_base.search("CLI auto dataset")
+
+        self.assertEqual(status, 0)
+        self.assertIn("新增/更新 1", output.getvalue())
+        self.assertTrue(results)
+
+    def test_dataset_index_command_streams_unknown_suffix_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "items.payload"
+            database_path = root / "knowledge.db"
+            source.write_text(
+                '{"_id":"row-1","text":"dataset CLI searchable"}\n',
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(output):
+                    status = main(
+                        [
+                            "index",
+                            str(source),
+                            "--dataset-name",
+                            "hotpotqa",
+                            "--db",
+                            str(database_path),
+                            "--log-file",
+                            str(root / "app.log"),
+                        ]
+                    )
+            finally:
+                _reset_logging_handlers()
+
+            with KnowledgeBase(database_path) as knowledge_base:
+                results = knowledge_base.search("CLI searchable")
+
+        self.assertEqual(status, 0)
+        self.assertIn("新增/更新 1", output.getvalue())
+        self.assertTrue(results)
+        self.assertEqual(results[0].record_path, "items.payload[row-1]")
+
     def test_web_port_defaults_to_8000_and_accepts_override(self):
         parser = build_parser()
 

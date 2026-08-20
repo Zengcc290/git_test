@@ -19,8 +19,9 @@ from typing import Sequence
 # CLI 只负责参数和输出，具体能力由下层模块完成。
 from .database import KnowledgeBase
 from .embedding import EmbeddingSettings, RemoteQwen3EmbeddingModel
+from .extractors import SUPPORTED_SUFFIXES
 from .highlighting import highlight_text
-from .indexer import index_paths
+from .indexer import index_datasets, index_paths
 from .json_parser import (
     DEFAULT_MAX_JSON_SIZE,
     DEFAULT_JSON_RECORD_PROBE_SIZE,
@@ -39,6 +40,16 @@ from .web.app import run_web
 
 
 logger = logging.getLogger(__name__)
+
+
+def _looks_like_dataset_input(paths: Sequence[Path]) -> bool:
+    """Route direct non-document files through the datasets reader."""
+
+    return any(
+        path.expanduser().is_file()
+        and path.expanduser().suffix.lower() not in SUPPORTED_SUFFIXES
+        for path in paths
+    )
 
 
 def _configure_console_encoding() -> None:
@@ -141,16 +152,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="导入并结构化索引文档、JSON 和 Python/C/C++ 代码",
     )
     index_parser.add_argument("paths", nargs="+", type=Path, help="文件或目录，可重复传入")
+    index_parser.add_argument(
+        "--dataset-name",
+        help=(
+            "按 Hugging Face datasets 流式读取输入文件；省略或填 auto 时按首条记录字段自动识别"
+        ),
+    )
+    index_parser.add_argument(
+        "--dataset-format",
+        default=None,
+        help="datasets builder（如 json、parquet、csv、text）；默认按内容自动探测",
+    )
+    index_parser.add_argument(
+        "--dataset-split",
+        default="train",
+        help="datasets split 名称（默认：train）",
+    )
     index_parser.add_argument("--chunk-size", type=int, default=800, help="分段目标字符数")
     index_parser.add_argument("--overlap", type=int, default=200, help="最终块的上下文重叠字符数")
     index_parser.add_argument("--min-chunk-chars", type=int, default=200)
     index_parser.add_argument("--max-chunk-chars", type=int, default=1600)
     index_parser.add_argument("--semantic-merge-threshold", type=float, default=0.80)
-    index_parser.add_argument("--max-chunk-tokens", type=int, default=8192)
+    index_parser.add_argument(
+        "--max-chunk-tokens",
+        type=int,
+        default=8192,
+        help=(
+            "最终 Embedding 输入的最大 token 数；应不超过服务端 max-length "
+            "（默认：8192）"
+        ),
+    )
     index_parser.add_argument(
         "--embedding",
         action="store_true",
-        help="使用 Qwen3 语义合并并写入最终 Chunk 向量",
+        help=(
+            "写入最终 Chunk 向量并启用 Qwen3 语义合并；"
+            "Embedding 请求按有界批次发送"
+        ),
     )
     _add_embedding_options(index_parser)
     index_parser.add_argument("--force", action="store_true", help="忽略哈希，强制重新索引")
@@ -378,7 +416,10 @@ def _print_index_stats(stats) -> None:
         f"发现 {stats.files_found}，新增/更新 {stats.indexed}，"
         f"跳过 {stats.skipped}，空文本 {stats.empty}，"
         f"超大 JSON {stats.oversized}，失败 {stats.failed}，"
-        f"生成向量 {stats.embeddings_generated}"
+        f"生成向量 {stats.embeddings_generated}；"
+        f"【预估分块：当前完成的分块】"
+        f"【{stats.estimated_chunks}：{stats.completed_chunks}】；"
+        f"耗时 {stats.elapsed_seconds:.1f} 秒"
     )
 
 
@@ -392,6 +433,23 @@ def _print_index_progress(progress: IndexProgress) -> None:
         "oversized": "跳过（JSON 超大）",
         "failed": "失败",
     }
+    if progress.status == "progress":
+        remaining = (
+            f"{progress.estimated_remaining_seconds:.1f} 秒"
+            if progress.estimated_remaining_seconds is not None
+            else "计算中"
+        )
+        print(
+            f"\r索引进度 [{progress.current}/{progress.total}] "
+            f"【预估分块：当前完成的分块】"
+            f"【{progress.estimated_chunks}：{progress.completed_chunks}】 "
+            f"耗时 {progress.elapsed_seconds:.1f} 秒，"
+            f"预计剩余 {remaining}，"
+            f"预计完成时间 {progress.estimated_completion_time or '计算中'}",
+            end="",
+            flush=True,
+        )
+        return
     if progress.status == "processing":
         print(
             f"索引进度 [{progress.current}/{progress.total}]："
@@ -562,6 +620,14 @@ def _run(args: argparse.Namespace) -> int:
 
         if args.command == "index":
             # 对输入路径执行抽取、清洗、分段、增量判断和数据库写入。
+            dataset_mode = (
+                args.dataset_name is not None
+                or args.dataset_format is not None
+                or args.dataset_split != "train"
+                or _looks_like_dataset_input(args.paths)
+            )
+            if dataset_mode and args.json_config is not None:
+                raise ValueError("数据集索引不能同时使用 --json-config")
             json_profile = (
                 JsonProfile.from_file(args.json_config)
                 if args.json_config is not None
@@ -573,24 +639,43 @@ def _run(args: argparse.Namespace) -> int:
                     "可稍后运行 `knowledge_search embed` 补齐向量。"
                 )
             embedding_backend = _embedding_backend(args) if args.embedding else None
-            stats = index_paths(
-                knowledge_base,
-                args.paths,
-                chunk_size=args.chunk_size,
-                overlap=args.overlap,
-                min_chunk_chars=args.min_chunk_chars,
-                max_chunk_chars=args.max_chunk_chars,
-                semantic_merge_threshold=args.semantic_merge_threshold,
-                max_chunk_tokens=args.max_chunk_tokens,
-                embedding_backend=embedding_backend,
-                force=args.force,
-                json_profile=json_profile,
-                exclude_dirs=args.exclude_dirs,
-                max_files=args.max_files,
-                max_json_size=args.max_json_size,
-                json_record_probe_size=args.json_record_probe_size,
-                progress_callback=_print_index_progress,
-            )
+            if dataset_mode:
+                stats = index_datasets(
+                    knowledge_base,
+                    args.paths,
+                    dataset_name=args.dataset_name,
+                    split=args.dataset_split,
+                    file_format=args.dataset_format,
+                    chunk_size=args.chunk_size,
+                    overlap=args.overlap,
+                    min_chunk_chars=args.min_chunk_chars,
+                    max_chunk_chars=args.max_chunk_chars,
+                    semantic_merge_threshold=args.semantic_merge_threshold,
+                    max_chunk_tokens=args.max_chunk_tokens,
+                    embedding_backend=embedding_backend,
+                    force=args.force,
+                    max_files=args.max_files,
+                    progress_callback=_print_index_progress,
+                )
+            else:
+                stats = index_paths(
+                    knowledge_base,
+                    args.paths,
+                    chunk_size=args.chunk_size,
+                    overlap=args.overlap,
+                    min_chunk_chars=args.min_chunk_chars,
+                    max_chunk_chars=args.max_chunk_chars,
+                    semantic_merge_threshold=args.semantic_merge_threshold,
+                    max_chunk_tokens=args.max_chunk_tokens,
+                    embedding_backend=embedding_backend,
+                    force=args.force,
+                    json_profile=json_profile,
+                    exclude_dirs=args.exclude_dirs,
+                    max_files=args.max_files,
+                    max_json_size=args.max_json_size,
+                    json_record_probe_size=args.json_record_probe_size,
+                    progress_callback=_print_index_progress,
+                )
             _print_index_stats(stats)
             # 只有全部文件都失败/被大小保护且没有任何成功索引时，才返回失败状态。
             unsuccessful = stats.failed + stats.oversized

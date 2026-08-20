@@ -73,9 +73,9 @@ Web 搜索和问答默认使用语义向量检索；API 仍可用 `mode=keyword`
 
 ## 语义分块与 Embedding
 
-正式语义链路只使用 `Qwen/Qwen3-Embedding-0.6B`。默认参数在 [`configs/embedding.json`](configs/embedding.json)：800 字符无重叠核心块、200 字符最终重叠、200/1600 字符最小/最大长度、0.80 合并阈值、1024 维 float32、L2 归一化和 batch size 16。
+正式语义链路只使用 `Qwen/Qwen3-Embedding-0.6B`。默认参数在 [`configs/embedding.json`](configs/embedding.json)：800 字符无重叠核心块、200 字符最终重叠、200/1600 字符最小/最大长度、0.80 合并阈值、最终 Embedding 输入最多 8192 token、1024 维 float32、L2 归一化和 batch size 16。
 
-分块顺序固定为：结构块 -> 无重叠核心块 -> 核心向量 -> 相邻核心块语义合并 -> 最终边界加重叠 -> 最终文本重新向量化。标题、JSON 记录、代码函数/类、PDF 页和 PPT 幻灯片等硬边界优先级高于语义和长度，任何相似度都不能跨越硬边界。
+分块顺序固定为：结构块 -> 无重叠核心块 -> 核心向量 -> 相邻核心块语义合并 -> 最终边界加重叠 -> 最终文本重新向量化。Embedding 请求按有界批次发送，但批次边界不是语义边界；当前合并组和相邻核心向量会跨批次保留，因此大文件不会因批处理改变合并结果。标题、JSON 记录、代码函数/类、PDF 页和 PPT 幻灯片等硬边界优先级高于语义和长度，任何相似度都不能跨越硬边界。
 
 Embedding 模型运行在远端服务器，本项目不安装 PyTorch 或下载模型权重。先建立 SSH 本地端口转发，使服务可通过 `127.0.0.1:8000` 访问。客户端会从 OpenAPI 自动识别当前的 `POST /embed`（`{"texts": [...]}`）接口，也兼容 OpenAI/vLLM 的 `/v1/models`、`/v1/embeddings`，然后建立语义索引：
 
@@ -100,10 +100,10 @@ python3 -m venv .venv-server
   --model Qwen/Qwen3-Embedding-0.6B \
   --host 0.0.0.0 --port 8000 \
   --max-batch-size 16 --max-batch-tokens 8192 \
-  --max-length 2048 --batch-wait-ms 3
+  --max-length 8192 --batch-wait-ms 3
 ```
 
-服务只启动一个 worker，模型只在显卡上加载一次；多个请求会在 3ms 窗口内合并为微批，避免并发请求复制模型或让 GPU 空转。2048 token 覆盖当前最大 1600 字符分块；需要处理真正的长文本时可改成 `--max-length 8192`，但应同步降低 `--max-batch-tokens`。`--max-batch-tokens 8192` 是 8GB P4 的保守上限，若 `nvidia-smi` 显示显存仍有余量，可逐步调到 12288；发生 OOM 时先降到 4096。客户端索引批大小应与服务端一致：
+服务只启动一个 worker，模型只在显卡上加载一次；多个请求会在 3ms 窗口内合并为微批，避免并发请求复制模型或让 GPU 空转。默认 `max-length=8192` 覆盖当前最大 1600 字符分块的最坏 UTF-8 token 上界；服务端现在会拒绝超过 `max-length` 的输入，不会静默截断。若降低服务端 `--max-length`，必须同步把客户端 `--max-chunk-tokens` 调到不超过该值。`--max-batch-tokens 8192` 是 8GB P4 的保守上限，若 `nvidia-smi` 显示显存仍有余量，可逐步调到 12288；发生 OOM 时先降到 4096。客户端索引批大小应与服务端一致：
 
 ```powershell
 .\.venv\Scripts\python.exe -m knowledge_search index .\my-docs `
@@ -120,6 +120,14 @@ python3 -m venv .venv-server
 ```
 
 `embeddings` 按 Chunk、模型 revision、维度、输入模板、内容摘要和分块指纹增量缓存。查询时会调用同一个 Embedding 服务生成用户问题向量；向量检索优先使用 `sqlite-vec` 的 SQLite KNN 索引，将归一化向量的距离转换为余弦相似度，并在扩展不可用时自动回退到 NumPy。向量新增、删除或更新后 sqlite-vec 派生表会自动同步。未启用 `--embedding` 的旧索引仍可继续使用 FTS5 关键词检索。
+
+### 索引可靠性与动态进度
+
+索引与补向量采用三层处理：
+
+1. Embedding HTTP 请求遇到连接拒绝、SSH 转发中断、连接重置、超时或 HTTP `408`、`429`、`500`、`502`、`503`、`504` 时，每隔 1 秒自动重试，最多重试 5 次。HTTP `400`、`401`、`403`、向量维度不匹配、无效 JSON 和模型不存在等永久错误会立即失败，不会重试。
+2. 索引启动后由后台线程每秒更新一次分块进度、经过时间、当前速率、预计剩余时间和预计完成时间；日志及终端使用 `【预估分块：当前完成的分块】` 显示。预估值先按输入大小计算，再随实际分块及语义合并结果动态校准；每完成 200 个分块额外记录一条日志。
+3. 已提交且配置、摘要、维度有效的向量不会重复生成；重新执行 `embed` 只补缺失或失效向量。数据库仍以单个文档为一个事务：超大文档在中途失败时，该文档本次写入整体回滚，其他已提交文档不受影响；重新执行后会重新生成该文档的向量。
 
 ## 环境准备
 
@@ -282,7 +290,7 @@ JSON 文件通过配置文件解析。配置可以指定记录路径、参与索
 
 ## 统一数据集读取器
 
-Parquet、JSONL 和 `.jsonl.gz` 等数据集文件不进入文档后缀解析器。`datasets` 负责物理格式和压缩解码，数据集适配器只把字段统一成：
+Parquet、JSONL、压缩文件以及后缀不标准的数据集文件不进入文档后缀解析器。`datasets` 负责物理格式和压缩解码，读取始终使用 `streaming=True`；数据集适配器只把字段统一成：
 
 ```python
 {
@@ -330,6 +338,29 @@ record = next(records)
 print(record["title"])
 print(record["text"][:800])
 ```
+
+本地文件没有限制后缀。已知后缀会直接选择对应 builder；未知后缀会读取少量文件头并按 `parquet`、`json`、`csv`、`text` 候选流式探测。读取到第一条记录后，`dataset_reader` 会根据字段名自动选择内置适配器；只检查这一条记录，后续记录不会重复判断。
+
+```python
+from knowledge_search.dataset_reader import iter_local_dataset
+
+records = iter_local_dataset(
+    r"C:\data\train.payload",
+    "hotpotqa",  # 也可以省略，首次记录会自动识别
+    file_format="json",  # 也可以是 parquet、csv、text 等
+)
+```
+
+`file_format="auto"`（默认行为）会启用上述自动探测；`dataset_name` 省略或设为 `"auto"` 时按首条记录字段选择适配器，不会把整个文件载入内存。
+
+要将数据集真正写入知识库，直接把数据集文件传给 `index` 即可。此模式会绕过普通文档的后缀白名单，因此下列 `.payload`、无扩展名或错误扩展名文件都会进入 `datasets` 流式读取器：
+
+```powershell
+.\.venv\Scripts\python.exe -m knowledge_search index .\data\records.payload `
+  --db .\data\knowledge.db
+```
+
+`--dataset-name` 可以显式指定内置字段适配器，例如 `dureader`、`github_code`、`codesearchnet`、`narrativeqa`、`natural_questions`、`msmarco` 或 `hotpotqa`；省略或写成 `auto` 时自动识别。物理格式明确时可附加 `--dataset-format json`、`--dataset-format parquet`、`--dataset-format csv` 或任意 `datasets` 支持的 builder；省略时按内容自动探测。可用 `--dataset-split` 指定 split，默认是 `train`。
 
 当前内置适配器包括 `dureader`、`github_code`、`codesearchnet`、`narrativeqa`、`natural_questions`、`msmarco` 和 `hotpotqa`。新增数据集可以通过 `register_adapter()` 注册字段映射，不需要重写或修改 Parquet、JSONL、GZIP 物理读取器。`iter_dataset_blocks()` 可将统一记录转换为带记录硬边界的 `DocumentBlock`；只有 `record["text"]` 作为可引用原文，标题与记录 ID 作为结构上下文，问题、答案和 `meta` 仍保留在统一记录中供评估或上层存储。
 

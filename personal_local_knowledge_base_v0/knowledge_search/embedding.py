@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
@@ -16,6 +18,9 @@ from urllib.request import Request, urlopen
 import numpy as np
 
 
+logger = logging.getLogger(__name__)
+
+
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_QUERY_INSTRUCTION = (
     "根据用户问题，从知识库中检索能够直接回答问题的相关文档片段"
@@ -23,7 +28,7 @@ DEFAULT_QUERY_INSTRUCTION = (
 CODE_QUERY_INSTRUCTION = (
     "根据用户问题，从代码库中检索相关的实现、函数、类或调用逻辑"
 )
-DOCUMENT_INPUT_TEMPLATE_VERSION = "qwen3-document-v1"
+DOCUMENT_INPUT_TEMPLATE_VERSION = "qwen3-document-v2-strict-length"
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,17 @@ def validate_vectors(
 class RemoteEmbeddingError(RuntimeError):
     """The SSH-forwarded embedding service could not satisfy a request."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+
 
 class RemoteQwen3EmbeddingModel:
     """Batch Qwen3 requests through an OpenAI/vLLM-compatible HTTP service."""
@@ -170,6 +186,8 @@ class RemoteQwen3EmbeddingModel:
         api_key: str | None = None,
         timeout: float = 120.0,
         protocol: str = "auto",
+        max_retries: int = 5,
+        retry_delay: float = 1.0,
     ) -> None:
         self.settings = settings or EmbeddingSettings()
         if not base_url.strip():
@@ -178,11 +196,17 @@ class RemoteQwen3EmbeddingModel:
             raise ValueError("embedding_timeout 必须大于 0")
         if protocol not in {"auto", "openai", "simple"}:
             raise ValueError("embedding_protocol 必须是 auto、openai 或 simple")
+        if max_retries < 0:
+            raise ValueError("embedding_max_retries 不能小于 0")
+        if retry_delay < 0:
+            raise ValueError("embedding_retry_delay 不能小于 0")
         root = base_url.strip().rstrip("/")
         self.base_url = root[:-3] if root.endswith("/v1") else root
         self.api_key = api_key or os.getenv("EMBEDDING_API_KEY", "")
         self.timeout = timeout
         self.protocol = protocol
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         self._resolved_protocol: str | None = None
         self._resolved_revision: str | None = None
 
@@ -222,27 +246,59 @@ class RemoteQwen3EmbeddingModel:
             headers=headers,
             method="POST" if payload is not None else "GET",
         )
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8")
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:500]
-            if self.api_key:
-                detail = detail.replace(self.api_key, "[REDACTED]")
-            raise RemoteEmbeddingError(
-                f"Embedding 服务返回 HTTP {exc.code}：{detail}"
-            ) from exc
-        except (URLError, OSError, TimeoutError) as exc:
-            raise RemoteEmbeddingError(
-                f"无法连接 Embedding 服务 {self.base_url}：{exc}"
-            ) from exc
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RemoteEmbeddingError("Embedding 服务返回了无效 JSON") from exc
-        if not isinstance(parsed, dict):
-            raise RemoteEmbeddingError("Embedding 服务响应必须是 JSON 对象")
-        return parsed
+        for attempt in range(self.max_retries + 1):
+            cause: BaseException | None = None
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    raw_bytes = response.read()
+            except HTTPError as exc:
+                cause = exc
+                detail = exc.read().decode("utf-8", errors="replace")[:500]
+                if self.api_key:
+                    detail = detail.replace(self.api_key, "[REDACTED]")
+                retryable = exc.code in {408, 429, 500, 502, 503, 504}
+                error = RemoteEmbeddingError(
+                    f"Embedding 服务返回 HTTP {exc.code}：{detail}",
+                    retryable=retryable,
+                    status_code=exc.code,
+                )
+            except (URLError, OSError, TimeoutError) as exc:
+                cause = exc
+                error = RemoteEmbeddingError(
+                    f"无法连接 Embedding 服务 {self.base_url}：{exc}",
+                    retryable=True,
+                )
+            else:
+                try:
+                    raw = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise RemoteEmbeddingError(
+                        "Embedding 服务返回了非 UTF-8 JSON"
+                    ) from exc
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise RemoteEmbeddingError(
+                        "Embedding 服务返回了无效 JSON"
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise RemoteEmbeddingError(
+                        "Embedding 服务响应必须是 JSON 对象"
+                    )
+                return parsed
+
+            if not error.retryable or attempt >= self.max_retries:
+                raise error from cause
+            logger.warning(
+                "Embedding 请求临时失败（第 %s/%s 次重试）：%s；%s 秒后重试",
+                attempt + 1,
+                self.max_retries,
+                error,
+                self.retry_delay,
+            )
+            if self.retry_delay:
+                time.sleep(self.retry_delay)
+        raise AssertionError("unreachable")
 
     @property
     def model_revision(self) -> str:

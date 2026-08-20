@@ -1,15 +1,187 @@
 # 使用临时目录模拟用户提供的文档目录。
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 # 导入数据库和完整索引流水线。
 from knowledge_search.database import KnowledgeBase
-from knowledge_search.indexer import discover_files, index_paths
+from knowledge_search.embedding import EmbeddingSettings
+from knowledge_search.indexer import (
+    _IndexProgressTracker,
+    _iter_dataset_chunks,
+    discover_files,
+    index_datasets,
+    index_paths,
+)
 from knowledge_search.json_parser import JsonField, JsonProfile
 
 
+class _BatchEmbeddingBackend:
+    settings = EmbeddingSettings(
+        model_name="test/batch",
+        model_revision="test-revision",
+        dimension=2,
+        batch_size=2,
+    )
+
+    def __init__(self):
+        self.calls = []
+
+    @property
+    def model_revision(self):
+        return "test-revision"
+
+    def embed_documents(self, texts):
+        self.calls.append(list(texts))
+        return np.tile(np.asarray([[1.0, 0.0]], dtype=np.float32), (len(texts), 1))
+
+    def token_count(self, text):
+        return len(text)
+
+
 class IndexerTests(unittest.TestCase):
+    def test_dataset_chunks_batch_final_embeddings_across_records(self):
+        records = [
+            {
+                "id": str(index),
+                "title": None,
+                "text": f"record {index}",
+                "query": None,
+                "answers": [],
+                "meta": {},
+            }
+            for index in range(5)
+        ]
+        backend = _BatchEmbeddingBackend()
+
+        chunks = list(
+            _iter_dataset_chunks(
+                records,
+                source_name="records.jsonl",
+                chunk_size=100,
+                overlap=0,
+                min_chunk_chars=1,
+                max_chunk_chars=100,
+                semantic_merge_threshold=0.8,
+                max_chunk_tokens=8192,
+                embedding_backend=backend,
+            )
+        )
+
+        self.assertEqual(len(chunks), 5)
+        self.assertEqual([len(call) for call in backend.calls], [2, 2, 1])
+        self.assertTrue(all(chunk.embedding_vector == (1.0, 0.0) for chunk in chunks))
+
+    def test_dataset_chunks_keep_semantic_merge_inside_record(self):
+        records = [
+            {
+                "id": "0",
+                "title": None,
+                "text": "abcdefghij" * 3,
+                "query": None,
+                "answers": [],
+                "meta": {},
+            }
+        ]
+        backend = _BatchEmbeddingBackend()
+        chunks = list(
+            _iter_dataset_chunks(
+                records,
+                source_name="records.parquet",
+                chunk_size=10,
+                overlap=0,
+                min_chunk_chars=1,
+                max_chunk_chars=20,
+                semantic_merge_threshold=0.8,
+                max_chunk_tokens=8192,
+                embedding_backend=backend,
+            )
+        )
+
+        self.assertEqual(len(chunks), 2)
+        self.assertGreaterEqual(len(backend.calls), 2)
+        self.assertEqual(len(backend.calls[-1]), 2)
+
+    def test_chunk_progress_is_updated_each_second_and_at_200_chunks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "large.txt"
+            source.write_text("x" * 5_000, encoding="utf-8")
+            events = []
+            tracker = _IndexProgressTracker(
+                [source],
+                chunk_size=10,
+                overlap=0,
+                progress_callback=events.append,
+            )
+            tracker.start_file(1, source)
+            with self.assertLogs("knowledge_search.indexer", level="INFO") as logs:
+                tracker.chunk_completed(200, processed_bytes=4_000)
+                dynamic_snapshot = tracker.snapshot()
+                time.sleep(1.05)
+                tracker.finish_file(source, 200)
+                snapshot = tracker.close()
+
+        self.assertTrue(any(event.status == "progress" for event in events))
+        self.assertTrue(any("当前完成的分块 200" in line for line in logs.output))
+        self.assertEqual(dynamic_snapshot["estimated_chunks"], 250)
+        self.assertEqual(snapshot["estimated_chunks"], 200)
+        self.assertEqual(snapshot["completed_chunks"], 200)
+        self.assertIsNotNone(snapshot["estimated_completion_time"])
+
+    def test_indexes_dataset_without_explicit_adapter_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "records.parquet"
+            source.write_text(
+                '{"anchor":"query","positive":"automatically detected body"}\n',
+                encoding="utf-8",
+            )
+
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                stats = index_datasets(knowledge_base, [source])
+                results = knowledge_base.search("automatically detected")
+
+        self.assertEqual(stats.indexed, 1)
+        self.assertTrue(results)
+        self.assertEqual(results[0].content, "automatically detected body")
+
+    def test_indexes_unknown_suffix_dataset_through_datasets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "records.payload"
+            source.write_text(
+                '{"_id":"first","title":"One","text":"first searchable record"}\n'
+                '{"_id":"second","title":"Two","text":"second searchable record"}\n',
+                encoding="utf-8",
+            )
+
+            with KnowledgeBase(root / "knowledge.db") as knowledge_base:
+                first = index_datasets(
+                    knowledge_base,
+                    [source],
+                    dataset_name="hotpotqa",
+                )
+                results = knowledge_base.search("second searchable")
+                document = knowledge_base.list_documents()[0]
+                second = index_datasets(
+                    knowledge_base,
+                    [source],
+                    dataset_name="hotpotqa",
+                )
+
+        self.assertEqual(first.files_found, 1)
+        self.assertEqual(first.indexed, 1)
+        self.assertEqual(first.failed, 0)
+        self.assertTrue(results)
+        self.assertEqual(results[0].content, "second searchable record")
+        self.assertEqual(results[0].record_path, "records.payload[second]")
+        self.assertEqual(document.file_type, "dataset")
+        self.assertEqual(document.parser, "huggingface-datasets")
+        self.assertEqual(second.skipped, 1)
+
     def test_excludes_directories_deduplicates_inputs_and_limits_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -93,7 +265,7 @@ class IndexerTests(unittest.TestCase):
             events = []
 
             with KnowledgeBase(root / "knowledge.db") as knowledge_base:
-                index_paths(
+                stats = index_paths(
                     knowledge_base,
                     [root],
                     progress_callback=events.append,
@@ -106,6 +278,7 @@ class IndexerTests(unittest.TestCase):
                 "indexed",
             ])
             self.assertEqual({event.total for event in events}, {2})
+            self.assertEqual(stats.estimated_chunks, stats.completed_chunks)
 
     def test_large_json_record_is_chunked_without_merging_next_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:

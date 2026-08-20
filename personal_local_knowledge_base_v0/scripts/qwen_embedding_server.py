@@ -51,7 +51,7 @@ class EmbeddingEngine:
         revision: str | None = None,
         max_batch_size: int = 16,
         max_batch_tokens: int = 8192,
-        max_length: int = 2048,
+        max_length: int = 8192,
         batch_wait_ms: float = 3.0,
     ) -> None:
         self.model_name = model_name
@@ -172,10 +172,19 @@ class EmbeddingEngine:
             encoded = self.tokenizer(
                 texts,
                 padding=True,
+                # Keep one extra token so over-limit input is rejected below
+                # without materializing arbitrarily long sequences.
                 truncation=True,
-                max_length=self.max_length,
+                max_length=self.max_length + 1,
                 return_tensors="pt",
             )
+            sequence_lengths = encoded["attention_mask"].sum(dim=1)
+            if bool(sequence_lengths.max().item() > self.max_length):
+                actual = int(sequence_lengths.max().item())
+                raise ValueError(
+                    f"输入 token 数 {actual} 超过服务端 max_length={self.max_length}；"
+                    "请降低客户端 max_chunk_tokens 或提高服务端 max-length"
+                )
             encoded = {key: value.to(self.device, non_blocking=True) for key, value in encoded.items()}
             outputs = self.model(**encoded)
             hidden = outputs.last_hidden_state
@@ -199,11 +208,27 @@ def create_app(engine: EmbeddingEngine) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"status": "ok", "model": engine.model_name, "dimension": engine.dimension}
+        return {
+            "status": "ok",
+            "model": engine.model_name,
+            "dimension": engine.dimension,
+            "max_length": engine.max_length,
+            "max_batch_size": engine.max_batch_size,
+            "max_batch_tokens": engine.max_batch_tokens,
+        }
 
     @app.get("/v1/models")
     async def models() -> dict[str, Any]:
-        return {"data": [{"id": engine.model_name, "model_revision": engine.revision, "owned_by": "local"}]}
+        return {
+            "data": [
+                {
+                    "id": engine.model_name,
+                    "model_revision": engine.revision,
+                    "owned_by": "local",
+                    "max_input_tokens": engine.max_length,
+                }
+            ]
+        }
 
     @app.post("/embed")
     async def simple_embed(request: SimpleEmbeddingRequest) -> dict[str, Any]:
@@ -252,7 +277,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.getenv("QWEN_EMBEDDING_PORT", "8000")))
     parser.add_argument("--max-batch-size", type=int, default=int(os.getenv("QWEN_MAX_BATCH_SIZE", "16")))
     parser.add_argument("--max-batch-tokens", type=int, default=int(os.getenv("QWEN_MAX_BATCH_TOKENS", "8192")))
-    parser.add_argument("--max-length", type=int, default=int(os.getenv("QWEN_MAX_LENGTH", "2048")))
+    parser.add_argument("--max-length", type=int, default=int(os.getenv("QWEN_MAX_LENGTH", "8192")))
     parser.add_argument("--batch-wait-ms", type=float, default=float(os.getenv("QWEN_BATCH_WAIT_MS", "3")))
     args = parser.parse_args()
     torch.set_float32_matmul_precision("high")

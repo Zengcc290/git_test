@@ -8,7 +8,10 @@
 from __future__ import annotations
 
 import gc
+import gzip
 import hashlib
+import io
+import zipfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +21,9 @@ from .models import DocumentBlock
 
 DATASET_RECORD_KEYS = ("id", "title", "text", "query", "answers", "meta")
 DatasetAdapter = Callable[[Mapping[str, Any], int], dict[str, Any]]
+
+_NO_FIRST_ROW = object()
+_AUTO_FORMATS = ("parquet", "json", "csv", "text")
 
 
 class DatasetReaderError(RuntimeError):
@@ -150,9 +156,11 @@ def _normalize_natural_questions(row: Mapping[str, Any], index: int) -> dict[str
 
 def _normalize_text_record(row: Mapping[str, Any], index: int) -> dict[str, Any]:
     record = _base_record(index)
-    record["id"] = str(_value(row, "_id", index))
+    record["id"] = str(_value(row, "_id", _value(row, "id", index)))
     record["title"] = _text(_value(row, "title"))
-    record["text"] = _text(_value(row, "text"))
+    record["text"] = _text(
+        _value(row, "text", _value(row, "content", _value(row, "body", _value(row, "passage"))))
+    )
     return record
 
 
@@ -191,6 +199,48 @@ def available_adapters() -> tuple[str, ...]:
     return tuple(sorted(_ADAPTERS))
 
 
+def infer_dataset_name(row: Mapping[str, Any]) -> str:
+    """Infer a built-in adapter from one dataset row's field names.
+
+    Only the first streamed row is inspected by callers, so this remains a
+    constant-time startup check relative to dataset size. ``hotpotqa`` is the
+    stable default for the generic ``_id/title/text`` layout shared by several
+    passage datasets; callers can still override it explicitly when metadata
+    semantics matter.
+    """
+
+    if not isinstance(row, Mapping):
+        raise DatasetReaderError(
+            f"无法自动识别数据集字段：记录必须是映射对象，实际类型：{type(row).__name__}"
+        )
+    fields = set(row)
+    if {"anchor", "positive"}.issubset(fields):
+        return "dureader"
+    if {"repo_name", "path", "code"}.issubset(fields):
+        return "github_code"
+    if {"func_name", "whole_func_string", "docstring"}.issubset(fields):
+        return "codesearchnet"
+    document = row.get("document")
+    if isinstance(document, Mapping):
+        if isinstance(document.get("tokens"), Mapping) and {
+            "question",
+            "annotations",
+        }.issubset(fields):
+            return "natural_questions"
+        if (
+            isinstance(document.get("summary"), Mapping)
+            and "question" in fields
+            and "answers" in fields
+        ):
+            return "narrativeqa"
+    if fields & {"text", "content", "body", "passage"}:
+        return "hotpotqa"
+    raise DatasetReaderError(
+        "无法自动识别数据集字段；请指定 --dataset-name。"
+        f" 首条记录字段：{', '.join(sorted(str(field) for field in fields)) or '<空>'}"
+    )
+
+
 def normalize(
     dataset_name: str,
     row: Mapping[str, Any],
@@ -226,14 +276,29 @@ def _dataset_kwargs(config: str | None, split: str) -> dict[str, Any]:
 
 def _iter_normalized_rows(
     dataset: Iterable[Mapping[str, Any]],
-    adapter: str,
+    adapter: str | None,
+    *,
+    iterator: Iterator[Mapping[str, Any]] | None = None,
+    first_row: Any = _NO_FIRST_ROW,
 ) -> Iterator[dict[str, Any]]:
     """Normalize rows and explicitly release local streaming file handles."""
 
-    iterator = iter(dataset)
+    if iterator is None:
+        iterator = iter(dataset)
     try:
-        for index, row in enumerate(iterator):
-            yield normalize(adapter, row, index)
+        if first_row is not _NO_FIRST_ROW:
+            selected_adapter = adapter or infer_dataset_name(first_row)
+            yield normalize(selected_adapter, first_row, 0)
+            start_index = 1
+        else:
+            if adapter is None:
+                raise DatasetReaderError(
+                    "无法自动识别空数据集；请指定 dataset_name 或确认 split 有数据"
+                )
+            selected_adapter = adapter
+            start_index = 0
+        for index, row in enumerate(iterator, start=start_index):
+            yield normalize(selected_adapter, row, index)
     finally:
         close_iterator = getattr(iterator, "close", None)
         if callable(close_iterator):
@@ -252,14 +317,26 @@ def iter_huggingface(
     repo: str,
     config: str | None,
     split: str,
-    adapter: str,
+    adapter: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream a Hugging Face dataset and normalize each row lazily."""
 
+    if isinstance(adapter, str) and adapter.strip().lower() in {"", "auto", "infer"}:
+        adapter = None
     try:
         dataset = _load_dataset(repo, **_dataset_kwargs(config, split))
         try:
-            yield from _iter_normalized_rows(dataset, adapter)
+            iterator = iter(dataset)
+            try:
+                first_row = next(iterator)
+            except StopIteration:
+                first_row = _NO_FIRST_ROW
+            yield from _iter_normalized_rows(
+                dataset,
+                adapter,
+                iterator=iterator,
+                first_row=first_row,
+            )
         finally:
             dataset = None
             gc.collect()
@@ -286,19 +363,169 @@ def infer_local_format(path: Path) -> str:
     )
 
 
+def _read_format_probe(path: Path, *, read_size: int = 8192) -> bytes:
+    """Read a small decompressed sample without loading the dataset."""
+
+    with path.open("rb") as stream:
+        prefix = stream.read(4)
+    if prefix == b"\x1f\x8b":
+        with gzip.open(path, "rb") as stream:
+            return stream.read(read_size)
+    if prefix[:2] == b"PK" and zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                with archive.open(member) as stream:
+                    return stream.read(read_size)
+        return b""
+    with path.open("rb") as stream:
+        return stream.read(read_size)
+
+
+def _auto_local_formats(path: Path) -> tuple[str, ...]:
+    """Return likely ``datasets`` builders for a file with an unknown suffix.
+
+    The suffix remains the fastest and least surprising signal. For arbitrary
+    names, a short content probe only orders the candidate builders; the
+    selected builder still validates the stream before any normalized row is
+    emitted.
+    """
+
+    try:
+        preferred = infer_local_format(path)
+        return (preferred,) + tuple(
+            builder for builder in _AUTO_FORMATS if builder != preferred
+        )
+    except ValueError:
+        pass
+
+    candidates = list(_AUTO_FORMATS)
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(8)
+            stream.seek(-8, io.SEEK_END)
+            footer = stream.read(8)
+        if header.startswith(b"PAR1") and b"PAR1" in footer:
+            return ("parquet",)
+    except (OSError, ValueError):
+        pass
+
+    try:
+        sample = _read_format_probe(path)
+    except (OSError, EOFError, gzip.BadGzipFile, zipfile.BadZipFile):
+        sample = b""
+    if sample.startswith(b"PAR1"):
+        # A compressed or archived Parquet file has no usable footer at the
+        # outer path, but the decompressed probe still identifies its builder.
+        return ("parquet",)
+    text = sample.decode("utf-8-sig", errors="ignore").lstrip()
+    if text.startswith(("{", "[")):
+        candidates.remove("json")
+        candidates.insert(0, "json")
+    elif text and "," in text.splitlines()[0]:
+        candidates.remove("csv")
+        candidates.insert(0, "csv")
+    elif text:
+        candidates.remove("text")
+        candidates.insert(0, "text")
+    return tuple(candidates)
+
+
+def _close_stream(dataset: Any, iterator: Any) -> None:
+    close_iterator = getattr(iterator, "close", None)
+    if callable(close_iterator):
+        close_iterator()
+    close_dataset = getattr(dataset, "close", None)
+    if callable(close_dataset):
+        close_dataset()
+
+
+def _iter_local_auto(
+    path: Path,
+    dataset_name: str | None,
+    split: str,
+) -> Iterator[dict[str, Any]]:
+    """Try dataset builders lazily when a local file has no known suffix."""
+
+    errors: list[str] = []
+    kwargs = {
+        "data_files": {split: str(path)},
+        **_dataset_kwargs(None, split),
+    }
+    for builder in _auto_local_formats(path):
+        dataset: Any = None
+        iterator: Any = None
+        try:
+            dataset = _load_dataset(builder, **kwargs)
+            iterator = iter(dataset)
+            try:
+                first_row = next(iterator)
+            except StopIteration:
+                first_row = _NO_FIRST_ROW
+        except DatasetReaderError:
+            raise
+        except Exception as exc:
+            errors.append(f"{builder}: {exc}")
+            _close_stream(dataset, iterator)
+            gc.collect()
+            continue
+
+        try:
+            yield from _iter_normalized_rows(
+                dataset,
+                dataset_name,
+                iterator=iterator,
+                first_row=first_row,
+            )
+        except DatasetReaderError:
+            raise
+        except Exception as exc:
+            raise DatasetReaderError(
+                f"读取本地数据集失败：{path}（builder={builder}）：{exc}"
+            ) from exc
+        return
+
+    detail = "; ".join(errors) or "没有可用的 datasets builder"
+    raise DatasetReaderError(
+        f"读取本地数据集失败：{path}；无法识别物理格式：{detail}"
+    )
+
+
 def iter_local_dataset(
     path: Path,
-    dataset_name: str,
+    dataset_name: str | None = None,
     *,
     split: str = "train",
     file_format: str | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Stream a local Parquet/JSONL/GZIP file through ``datasets``."""
+    """Stream a local dataset through ``datasets``, independent of its suffix.
+
+    ``file_format`` may be any builder accepted by ``datasets`` (for example
+    ``"json"`` or ``"parquet"``). When omitted, known suffixes are used first;
+    arbitrary names are content-probed and lazily tried with common builders.
+    """
 
     local_path = Path(path).expanduser().resolve()
     if not local_path.is_file():
         raise FileNotFoundError(f"数据集文件不存在：{local_path}")
-    builder = file_format or infer_local_format(local_path)
+    requested_format = (
+        file_format.strip().lower()
+        if isinstance(file_format, str)
+        else file_format
+    )
+    if requested_format in {"", "auto", "infer"}:
+        requested_format = None
+    if isinstance(dataset_name, str) and dataset_name.strip().lower() in {
+        "",
+        "auto",
+        "infer",
+    }:
+        dataset_name = None
+    if requested_format is None:
+        yield from _iter_local_auto(local_path, dataset_name, split)
+        return
+    builder = requested_format
     try:
         dataset = _load_dataset(
             builder,
@@ -306,7 +533,17 @@ def iter_local_dataset(
             **_dataset_kwargs(None, split),
         )
         try:
-            yield from _iter_normalized_rows(dataset, dataset_name)
+            iterator = iter(dataset)
+            try:
+                first_row = next(iterator)
+            except StopIteration:
+                first_row = _NO_FIRST_ROW
+            yield from _iter_normalized_rows(
+                dataset,
+                dataset_name,
+                iterator=iterator,
+                first_row=first_row,
+            )
         finally:
             dataset = None
             gc.collect()
@@ -369,7 +606,7 @@ def iter_dataset_blocks(
 
 def iter_dataset(
     source: str | Path,
-    dataset_name: str,
+    dataset_name: str | None = None,
     *,
     config: str | None = None,
     split: str = "train",

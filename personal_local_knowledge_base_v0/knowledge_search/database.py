@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 # Path 用于创建数据库目录并稳定处理文件路径。
 from pathlib import Path
 # Iterable 允许 replace_document 接收列表、生成器等任意分段集合。
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 
@@ -367,27 +367,34 @@ class KnowledgeBase:
             "hard_boundary_after": "INTEGER NOT NULL DEFAULT 0",
         }
         migrated = False
+        added_columns: set[str] = set()
         for name, definition in additions.items():
             if name not in chunk_columns:
                 self.connection.execute(
                     f"ALTER TABLE chunks ADD COLUMN {name} {definition}"
                 )
                 migrated = True
+                added_columns.add(name)
 
-        self.connection.execute(
-            """
-            UPDATE chunks
-            SET canonical_content = content
-            WHERE canonical_content = '' AND content != ''
-            """
-        )
-        self.connection.execute(
-            """
-            UPDATE chunks
-            SET embedding_content = canonical_content
-            WHERE embedding_content = '' AND canonical_content != ''
-            """
-        )
+        # These are one-time data migrations. Running them on every startup
+        # scans the full chunks table, which is especially expensive because
+        # it contains the source text and embedding input for every chunk.
+        if "canonical_content" in added_columns:
+            self.connection.execute(
+                """
+                UPDATE chunks
+                SET canonical_content = content
+                WHERE canonical_content = '' AND content != ''
+                """
+            )
+        if "embedding_content" in added_columns:
+            self.connection.execute(
+                """
+                UPDATE chunks
+                SET embedding_content = canonical_content
+                WHERE embedding_content = '' AND canonical_content != ''
+                """
+            )
         return migrated
 
     def _backfill_token_index(self) -> None:
@@ -674,6 +681,7 @@ class KnowledgeBase:
         backend: EmbeddingBackend,
         *,
         chunker_fingerprint: str,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> int:
         """Regenerate only missing or invalid vectors from stored chunks."""
 
@@ -747,6 +755,11 @@ class KnowledgeBase:
                         for row, vector in zip(batch, vectors)
                     ),
                 )
+                if progress_callback is not None:
+                    try:
+                        progress_callback(len(batch))
+                    except Exception:
+                        logger.exception("Embedding 进度回调失败：%s", document_path)
         return len(stale)
 
     @staticmethod

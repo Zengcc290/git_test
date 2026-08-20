@@ -11,6 +11,7 @@ from knowledge_search.dataset_reader import (
     DatasetReaderError,
     available_adapters,
     infer_local_format,
+    infer_dataset_name,
     iter_dataset_blocks,
     iter_dataset,
     iter_huggingface,
@@ -132,6 +133,22 @@ class DatasetNormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported dataset"):
             normalize("unknown", {}, 0)
 
+    def test_infers_adapter_from_one_row_schema(self):
+        self.assertEqual(
+            infer_dataset_name({"anchor": "q", "positive": "p"}),
+            "dureader",
+        )
+        self.assertEqual(
+            infer_dataset_name({"repo_name": "org/repo", "path": "a.py", "code": "pass"}),
+            "github_code",
+        )
+        self.assertEqual(
+            infer_dataset_name({"_id": "p1", "title": "Title", "text": "Body"}),
+            "hotpotqa",
+        )
+        with self.assertRaisesRegex(DatasetReaderError, "无法自动识别数据集字段"):
+            infer_dataset_name({"unknown": "value"})
+
     def test_registers_custom_adapter_without_new_physical_parser(self):
         def custom_adapter(row, index):
             return {
@@ -159,6 +176,69 @@ class DatasetStreamingTests(unittest.TestCase):
         self.assertEqual(infer_local_format(Path("train.jsonl.gz")), "json")
         with self.assertRaisesRegex(ValueError, "无法从文件后缀"):
             infer_local_format(Path("train.zip"))
+
+    def test_unknown_suffix_is_content_probed_and_streamed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            json_path = root / "records.data"
+            json_path.write_text(
+                '{"_id":"one","text":"first"}\n'
+                '{"_id":"two","text":"second"}\n',
+                encoding="utf-8",
+            )
+            text_path = root / "notes.bin"
+            text_path.write_text("first line\nsecond line\n", encoding="utf-8")
+
+            json_records = list(iter_local_dataset(json_path, "hotpotqa"))
+            text_records = list(iter_local_dataset(text_path, "hotpotqa"))
+
+        self.assertEqual([record["id"] for record in json_records], ["one", "two"])
+        self.assertEqual([record["text"] for record in text_records], ["first line", "second line"])
+
+    def test_unknown_suffix_can_use_explicit_datasets_builder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "records.payload"
+            path.write_text("body one\nbody two\n", encoding="utf-8")
+            with patch(
+                "knowledge_search.dataset_reader._load_dataset",
+                return_value=iter([{"text": "body one"}, {"text": "body two"}]),
+            ) as mocked:
+                records = list(
+                    iter_local_dataset(path, "hotpotqa", file_format="text")
+                )
+
+        self.assertEqual([record["text"] for record in records], ["body one", "body two"])
+        mocked.assert_called_once_with(
+            "text",
+            data_files={"train": str(path.resolve())},
+            split="train",
+            streaming=True,
+        )
+
+    def test_local_reader_auto_selects_adapter_after_one_row_probe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "records.parquet"
+            path.touch()
+            rows = iter(
+                [
+                    {"anchor": "q1", "positive": "p1"},
+                    {"anchor": "q2", "positive": "p2"},
+                ]
+            )
+            with patch(
+                "knowledge_search.dataset_reader._load_dataset",
+                return_value=rows,
+            ) as mocked:
+                records = list(iter_local_dataset(path))
+
+        self.assertEqual([record["query"] for record in records], ["q1", "q2"])
+        self.assertEqual([record["text"] for record in records], ["p1", "p2"])
+        mocked.assert_called_once_with(
+            "parquet",
+            data_files={"train": str(path.resolve())},
+            split="train",
+            streaming=True,
+        )
 
     def test_unified_entry_treats_dataset_file_names_as_local(self):
         with self.assertRaisesRegex(FileNotFoundError, "数据集文件不存在"):

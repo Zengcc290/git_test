@@ -1,5 +1,7 @@
 """按段落和长度切分文档。"""
 
+from __future__ import annotations
+
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 
@@ -43,7 +45,14 @@ class ChunkingConfig:
     def fingerprint(self) -> str:
         return self.fingerprint_for(None)
 
-    def fingerprint_for(self, backend: EmbeddingBackend | None) -> str:
+    def fingerprint_for(
+        self,
+        backend: EmbeddingBackend | None,
+        *,
+        semantic_merge_enabled: bool | None = None,
+    ) -> str:
+        if semantic_merge_enabled is None:
+            semantic_merge_enabled = backend is not None
         payload: dict[str, object] = {
             "algorithm": "structure-core-semantic-overlap-v1",
             "core_chunk_chars": self.core_chunk_chars,
@@ -52,7 +61,7 @@ class ChunkingConfig:
             "max_chunk_chars": self.max_chunk_chars,
             "semantic_merge_threshold": self.semantic_merge_threshold,
             "max_chunk_tokens": self.max_chunk_tokens,
-            "semantic_merge_enabled": backend is not None,
+            "semantic_merge_enabled": semantic_merge_enabled,
         }
         if backend is not None:
             payload.update(
@@ -256,6 +265,195 @@ def iter_chunk_blocks(
                 else None
             ),
         )
+
+
+def iter_chunk_blocks_batched(
+    blocks: Iterable[DocumentBlock],
+    chunk_size: int = 800,
+    overlap: int = 200,
+    *,
+    min_chunk_chars: int = 200,
+    max_chunk_chars: int = 1600,
+    semantic_merge_threshold: float = 0.80,
+    max_chunk_tokens: int = 8192,
+    embedding_backend: EmbeddingBackend | None = None,
+) -> Iterator[Chunk]:
+    """Chunk a block stream with bounded core/final embedding batches.
+
+    Batch boundaries are transport boundaries only.  The current merged group
+    and its last core vector are carried across batches, so adjacent blocks
+    retain the same semantic merge behavior as :func:`iter_chunk_blocks`.
+    Callers such as dataset indexing can mark records as hard boundaries on
+    their ``DocumentBlock`` values to prevent cross-record merges.
+    """
+
+    config = ChunkingConfig(
+        core_chunk_chars=chunk_size,
+        overlap_chars=overlap,
+        min_chunk_chars=min(min_chunk_chars, chunk_size),
+        max_chunk_chars=max_chunk_chars,
+        semantic_merge_threshold=semantic_merge_threshold,
+        max_chunk_tokens=max_chunk_tokens,
+    )
+    batch_limit = embedding_backend.settings.batch_size if embedding_backend else 1
+    pending_cores: list[_CoreChunk] = []
+    pending_drafts: list[tuple[_MergedCore, str, str]] = []
+    current_group: _MergedCore | None = None
+    current_vector = None
+    previous_group: _MergedCore | None = None
+    output_index = 0
+
+    def flush_drafts() -> Iterator[Chunk]:
+        nonlocal pending_drafts, output_index
+        if not pending_drafts:
+            return
+        if embedding_backend is None:
+            ready = [None] * len(pending_drafts)
+        else:
+            vectors = validate_vectors(
+                embedding_backend.embed_documents(
+                    [embedding_input for _group, _content, embedding_input in pending_drafts]
+                ),
+                expected_count=len(pending_drafts),
+                dimension=embedding_backend.settings.dimension,
+                normalized=embedding_backend.settings.normalize,
+            )
+            ready = list(vectors)
+        drafts = pending_drafts
+        pending_drafts = []
+        for draft, vector in zip(drafts, ready):
+            if vector is None:
+                yield _materialize_chunk(draft, None, output_index)
+            else:
+                yield _materialize_chunk(draft, vector, output_index)
+            output_index += 1
+
+    def finish_group(group: _MergedCore) -> Iterator[Chunk]:
+        nonlocal previous_group
+        groups = [group] if previous_group is None else [previous_group, group]
+        group_index = 0 if previous_group is None else 1
+        content = _add_final_overlap(groups, group_index, config, embedding_backend)
+        pending_drafts.append(
+            (
+                group,
+                content,
+                build_embedding_content(_located_block(group), content),
+            )
+        )
+        previous_group = group
+        if len(pending_drafts) >= batch_limit:
+            yield from flush_drafts()
+
+    def consume_core(core: _CoreChunk, vector) -> Iterator[Chunk]:
+        nonlocal current_group, current_vector
+        if current_group is None:
+            current_group = _MergedCore.from_core(core)
+            current_vector = vector
+            return
+
+        previous = current_group.last
+        separator = "" if previous.block.block_id == core.block.block_id else "\n\n"
+        similarity = (
+            cosine_similarity(current_vector, vector)
+            if current_vector is not None and vector is not None
+            else -1.0
+        )
+        candidate_content = f"{current_group.content}{separator}{core.content}"
+        can_merge = (
+            _same_structure(previous, core)
+            and not _crosses_hard_boundary(previous, core)
+            and similarity >= config.semantic_merge_threshold
+            and len(candidate_content) <= config.max_chunk_chars
+            and _within_token_limit(
+                candidate_content,
+                current_group.first.block,
+                config,
+                embedding_backend,
+            )
+        )
+        if can_merge:
+            current_group = current_group.append(core, separator)
+            current_vector = vector
+            return
+
+        yield from finish_group(current_group)
+        current_group = _MergedCore.from_core(core)
+        current_vector = vector
+
+    def flush_cores() -> Iterator[Chunk]:
+        nonlocal pending_cores
+        if not pending_cores:
+            return
+        cores = pending_cores
+        pending_cores = []
+        if embedding_backend is None:
+            vectors = [None] * len(cores)
+        else:
+            vectors = validate_vectors(
+                embedding_backend.embed_documents([core.content for core in cores]),
+                expected_count=len(cores),
+                dimension=embedding_backend.settings.dimension,
+                normalized=embedding_backend.settings.normalize,
+            )
+        for core, vector in zip(cores, vectors):
+            yield from consume_core(core, vector)
+
+    for block in blocks:
+        if not block.content.strip():
+            continue
+        block_cores = _make_core_chunks(block, config, embedding_backend)
+        # A singleton hard-boundary block can never participate in a semantic
+        # merge, so do not spend an embedding request just to compare it.
+        if (
+            embedding_backend is not None
+            and len(block_cores) == 1
+            and block_cores[0].hard_boundary_before
+            and block_cores[0].hard_boundary_after
+        ):
+            yield from flush_cores()
+            yield from consume_core(block_cores[0], None)
+            continue
+        for core in block_cores:
+            pending_cores.append(core)
+            if len(pending_cores) >= batch_limit:
+                yield from flush_cores()
+    yield from flush_cores()
+    if current_group is not None:
+        yield from finish_group(current_group)
+    yield from flush_drafts()
+
+
+def _materialize_chunk(draft, vector, output_index: int) -> Chunk:
+    group, content, embedding_content = draft
+    block = _located_block(group)
+    return Chunk(
+        index=output_index,
+        content=content,
+        start_offset=group.first.start_offset,
+        embedding_content=embedding_content,
+        block_id=_group_block_id(group),
+        block_type=block.block_type,
+        language=block.language,
+        heading_path=block.heading_path,
+        symbol_path=block.symbol_path,
+        start_line=block.start_line,
+        end_line=block.end_line,
+        page_number=block.page_number,
+        record_path=block.record_path,
+        slide_number=block.slide_number,
+        shape_index=block.shape_index,
+        module_name=block.module_name,
+        parameters=block.parameters,
+        docstring=block.docstring,
+        comments=block.comments,
+        hard_boundary_before=group.first.hard_boundary_before,
+        hard_boundary_after=group.last.hard_boundary_after,
+        embedding_vector=(
+            tuple(float(value) for value in vector)
+            if vector is not None
+            else None
+        ),
+    )
 
 
 @dataclass(frozen=True)
