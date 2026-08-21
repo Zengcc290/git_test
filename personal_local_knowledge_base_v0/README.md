@@ -73,7 +73,7 @@ Web 搜索和问答默认使用语义向量检索；API 仍可用 `mode=keyword`
 
 ## 语义分块与 Embedding
 
-正式语义链路只使用 `Qwen/Qwen3-Embedding-0.6B`。默认参数在 [`configs/embedding.json`](configs/embedding.json)：800 字符无重叠核心块、200 字符最终重叠、200/1600 字符最小/最大长度、0.80 合并阈值、最终 Embedding 输入最多 8192 token、1024 维 float32、L2 归一化和 batch size 16。
+正式语义链路只使用 `Qwen/Qwen3-Embedding-0.6B`。默认参数在 [`configs/embedding.json`](configs/embedding.json)：1600 字符无重叠核心块、200 字符最终重叠、400/3200 字符最小/最大长度、0.80 合并阈值、最终 Embedding 输入最多 8192 token、1024 维 float32、L2 归一化和 batch size 16。
 
 分块顺序固定为：结构块 -> 无重叠核心块 -> 核心向量 -> 相邻核心块语义合并 -> 最终边界加重叠 -> 最终文本重新向量化。Embedding 请求按有界批次发送，但批次边界不是语义边界；当前合并组和相邻核心向量会跨批次保留，因此大文件不会因批处理改变合并结果。标题、JSON 记录、代码函数/类、PDF 页和 PPT 幻灯片等硬边界优先级高于语义和长度，任何相似度都不能跨越硬边界。
 
@@ -81,7 +81,7 @@ Embedding 模型运行在远端服务器，本项目不安装 PyTorch 或下载�
 
 ```powershell
 .\.venv\Scripts\python.exe -m knowledge_search index .\my-docs `
-  --embedding --chunk-size 800 --overlap 200 `
+  --embedding --chunk-size 1600 --overlap 200 `
   --max-chunk-chars 1600 --semantic-merge-threshold 0.80 `
   --embedding-base-url http://127.0.0.1:8000
 ```
@@ -205,7 +205,7 @@ LLM_MODEL=模型名称
 .\.venv\Scripts\python.exe -m knowledge_search index .\my-docs `
   --exclude-dir cache --exclude-dir 'generated/*' `
   --max-files 1000 --max-json-size 1GB
-.\.venv\Scripts\python.exe -m knowledge_search index .\my-docs --chunk-size 800 --overlap 200 --force
+.\.venv\Scripts\python.exe -m knowledge_search index .\my-docs --chunk-size 1600 --overlap 200 --force
 .\.venv\Scripts\python.exe -m knowledge_search search "FTS5 SQLite" --db .\data\knowledge.db --limit 10
 ```
 

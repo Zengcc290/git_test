@@ -18,6 +18,26 @@ from typing import Sequence
 
 # CLI 只负责参数和输出，具体能力由下层模块完成。
 from .database import KnowledgeBase
+from .constants import (
+    DEFAULT_CHUNK_OVERLAP_CHARS,
+    DEFAULT_CORE_CHUNK_CHARS,
+    DEFAULT_DATASET_SPLIT,
+    DEFAULT_DB_PATH,
+    DEFAULT_CLI_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_DIMENSION,
+    DEFAULT_EMBEDDING_BASE_URL,
+    DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+    DEFAULT_LOG_LEVEL,
+    DEFAULT_LOG_PATH,
+    DEFAULT_MAX_CHUNK_CHARS,
+    DEFAULT_MAX_CHUNK_TOKENS,
+    DEFAULT_MIN_CHUNK_CHARS,
+    DEFAULT_SEARCH_LIMIT,
+    DEFAULT_UPLOAD_DIR,
+    DEFAULT_WEB_HOST,
+    DEFAULT_WEB_PORT,
+    DEFAULT_SEMANTIC_MERGE_THRESHOLD,
+)
 from .embedding import EmbeddingSettings, RemoteQwen3EmbeddingModel
 from .extractors import SUPPORTED_SUFFIXES
 from .highlighting import highlight_text
@@ -74,19 +94,19 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--db",
         type=Path,
-        default=Path("data/knowledge.db"),
+        default=DEFAULT_DB_PATH,
         help="SQLite 数据库路径（默认：data/knowledge.db）",
     )
     parser.add_argument(
         "--log-file",
         type=Path,
-        default=Path("logs/app.log"),
+        default=DEFAULT_LOG_PATH,
         help="日志文件路径（默认：logs/app.log）",
     )
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
-        default="INFO",
+        default=DEFAULT_LOG_LEVEL,
         help="日志级别",
     )
 
@@ -107,14 +127,18 @@ def _add_embedding_options(parser: argparse.ArgumentParser) -> None:
         default="auto",
         help="远端接口协议；默认从 OpenAPI 自动探测",
     )
-    parser.add_argument("--embedding-dimension", type=int, default=1024)
+    parser.add_argument(
+        "--embedding-dimension", type=int, default=DEFAULT_EMBEDDING_DIMENSION
+    )
     parser.add_argument(
         "--embedding-batch-size",
         type=int,
-        default=16,
+        default=DEFAULT_CLI_EMBEDDING_BATCH_SIZE,
         help="每次发给远端服务的文本数；P4 8GB 建议 16，可按实际长度调整",
     )
-    parser.add_argument("--embedding-timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--embedding-timeout", type=float, default=DEFAULT_EMBEDDING_TIMEOUT_SECONDS
+    )
 
 
 def _embedding_backend(args) -> RemoteQwen3EmbeddingModel:
@@ -130,7 +154,7 @@ def _embedding_backend(args) -> RemoteQwen3EmbeddingModel:
         ),
         base_url=(
             args.embedding_base_url
-            or os.getenv("EMBEDDING_BASE_URL", "http://127.0.0.1:8000")
+            or os.getenv("EMBEDDING_BASE_URL", DEFAULT_EMBEDDING_BASE_URL)
         ),
         timeout=args.embedding_timeout,
         protocol=args.embedding_protocol,
@@ -165,18 +189,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index_parser.add_argument(
         "--dataset-split",
-        default="train",
+        default=DEFAULT_DATASET_SPLIT,
         help="datasets split 名称（默认：train）",
     )
-    index_parser.add_argument("--chunk-size", type=int, default=800, help="分段目标字符数")
-    index_parser.add_argument("--overlap", type=int, default=200, help="最终块的上下文重叠字符数")
-    index_parser.add_argument("--min-chunk-chars", type=int, default=200)
-    index_parser.add_argument("--max-chunk-chars", type=int, default=1600)
-    index_parser.add_argument("--semantic-merge-threshold", type=float, default=0.80)
+    index_parser.add_argument(
+        "--chunk-size", type=int, default=DEFAULT_CORE_CHUNK_CHARS, help="分段目标字符数"
+    )
+    index_parser.add_argument(
+        "--overlap", type=int, default=DEFAULT_CHUNK_OVERLAP_CHARS, help="最终块的上下文重叠字符数"
+    )
+    index_parser.add_argument("--min-chunk-chars", type=int, default=DEFAULT_MIN_CHUNK_CHARS)
+    index_parser.add_argument("--max-chunk-chars", type=int, default=DEFAULT_MAX_CHUNK_CHARS)
+    index_parser.add_argument(
+        "--semantic-merge-threshold",
+        type=float,
+        default=DEFAULT_SEMANTIC_MERGE_THRESHOLD,
+    )
     index_parser.add_argument(
         "--max-chunk-tokens",
         type=int,
-        default=8192,
+        default=DEFAULT_MAX_CHUNK_TOKENS,
         help=(
             "最终 Embedding 输入的最大 token 数；应不超过服务端 max-length "
             "（默认：8192）"
@@ -307,7 +339,9 @@ def build_parser() -> argparse.ArgumentParser:
     # search 命令接收一个查询字符串，并限制返回条数。
     search_parser = subparsers.add_parser("search", help="搜索已索引内容")
     search_parser.add_argument("query", help="关键词，可输入多个词，默认 AND 匹配")
-    search_parser.add_argument("--limit", type=int, default=10, help="最多返回条数（默认：10）")
+    search_parser.add_argument(
+        "--limit", type=int, default=DEFAULT_SEARCH_LIMIT, help="最多返回条数（默认：10）"
+    )
     search_parser.add_argument("--no-color", action="store_true", help="不使用 ANSI 颜色，改用 [[...]] 标记")
     search_parser.add_argument(
         "--vector", action="store_true", help="使用查询 Embedding + sqlite-vec/NumPy 向量 Top-K"
@@ -393,15 +427,15 @@ def build_parser() -> argparse.ArgumentParser:
         "web", help="启动本地网页界面（搜索、问答、导入和管理）"
     )
     web_parser.add_argument(
-        "--host", default="127.0.0.1", help="监听地址（默认：127.0.0.1）"
+        "--host", default=DEFAULT_WEB_HOST, help="监听地址（默认：127.0.0.1）"
     )
     web_parser.add_argument(
-        "--port", type=int, default=8000, help="监听端口（默认：8000）"
+        "--port", type=int, default=DEFAULT_WEB_PORT, help="监听端口（默认：8000）"
     )
     web_parser.add_argument(
         "--upload-dir",
         type=Path,
-        default=Path("uploads"),
+        default=DEFAULT_UPLOAD_DIR,
         help="上传文件保存目录（默认：uploads）",
     )
     _add_embedding_options(web_parser)

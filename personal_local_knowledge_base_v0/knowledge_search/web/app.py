@@ -23,6 +23,22 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..database import KnowledgeBase
+from ..constants import (
+    DEFAULT_CHUNK_OVERLAP_CHARS,
+    DEFAULT_CORE_CHUNK_CHARS,
+    DEFAULT_MAX_SEARCH_LIMIT,
+    DEFAULT_SEARCH_LIMIT,
+    DEFAULT_UPLOAD_DIR,
+    DEFAULT_WEB_HOST,
+    DEFAULT_WEB_PORT,
+    MAX_CHUNK_SIZE,
+    MAX_CONTEXT_CHARS,
+    MAX_INDEX_PATHS,
+    MAX_JSON_BODY_BYTES,
+    MAX_MULTIPART_OVERHEAD,
+    MAX_QUESTION_CHARS,
+    MAX_UPLOAD_BYTES,
+)
 from ..embedding import EmbeddingBackend
 from ..extractors import SUPPORTED_SUFFIXES
 from ..indexer import index_paths
@@ -40,22 +56,20 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Uploads are written here before being indexed. Keeping them in one directory
 # makes document management predictable and lets ``list`` show real paths.
-DEFAULT_UPLOAD_DIR = Path("uploads")
-
 # Accepted extension set mirrors the extractor's supported types.
 _UPLOAD_SUFFIXES = SUPPORTED_SUFFIXES
 
 # Keep the limits in one place so both direct callers and HTTP requests use
 # the same policy.  The upload limit is deliberately conservative for a local
 # browser service; this local tool does not need a large-object store.
-_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
-_MAX_MULTIPART_OVERHEAD = 64 * 1024
-_MAX_JSON_BODY_BYTES = 1_000_000
-_MAX_SEARCH_LIMIT = 100
-_MAX_INDEX_PATHS = 100
-_MAX_QUESTION_CHARS = 10_000
-_MAX_CHUNK_SIZE = 100_000
-_MAX_CONTEXT_CHARS = 100_000
+_MAX_UPLOAD_BYTES = MAX_UPLOAD_BYTES
+_MAX_MULTIPART_OVERHEAD = MAX_MULTIPART_OVERHEAD
+_MAX_JSON_BODY_BYTES = MAX_JSON_BODY_BYTES
+_MAX_SEARCH_LIMIT = DEFAULT_MAX_SEARCH_LIMIT
+_MAX_INDEX_PATHS = MAX_INDEX_PATHS
+_MAX_QUESTION_CHARS = MAX_QUESTION_CHARS
+_MAX_CHUNK_SIZE = MAX_CHUNK_SIZE
+_MAX_CONTEXT_CHARS = MAX_CONTEXT_CHARS
 
 
 class _ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
@@ -143,7 +157,7 @@ class KnowledgeWebApp:
     def search(
         self,
         query: str,
-        limit: int = 10,
+        limit: int = DEFAULT_SEARCH_LIMIT,
         *,
         semantic: bool | None = None,
     ) -> list[dict[str, Any]]:
@@ -272,8 +286,8 @@ class KnowledgeWebApp:
         self,
         paths: list[Path],
         *,
-        chunk_size: int = 800,
-        overlap: int = 200,
+        chunk_size: int = DEFAULT_CORE_CHUNK_CHARS,
+        overlap: int = DEFAULT_CHUNK_OVERLAP_CHARS,
     ) -> dict[str, Any]:
         if not paths:
             raise ValueError("没有可索引的路径。")
@@ -467,7 +481,9 @@ class KnowledgeRequestHandler(BaseHTTPRequestHandler):
                     self._send_json({"results": []})
                     return
                 try:
-                    limit = int((query.get("limit") or ["10"])[0])
+                    limit = int(
+                        (query.get("limit") or [str(DEFAULT_SEARCH_LIMIT)])[0]
+                    )
                 except (TypeError, ValueError) as exc:
                     raise ValueError("limit 必须是整数。") from exc
                 mode = (query.get("mode") or [None])[0]
@@ -493,7 +509,7 @@ class KnowledgeRequestHandler(BaseHTTPRequestHandler):
             if route == "/api/search":
                 payload = self._read_json_object()
                 term = str(payload.get("q", "")).strip()
-                limit = int(payload.get("limit", 10))
+                limit = int(payload.get("limit", DEFAULT_SEARCH_LIMIT))
                 self._send_json(
                     {
                         "results": self.app.search(
@@ -528,8 +544,10 @@ class KnowledgeRequestHandler(BaseHTTPRequestHandler):
                 paths = [Path(item).expanduser() for item in raw_paths]
                 if not paths:
                     raise ValueError("没有可索引的路径。")
-                chunk_size = int(payload.get("chunk_size", 800))
-                overlap = int(payload.get("overlap", 200))
+                chunk_size = int(payload.get("chunk_size", DEFAULT_CORE_CHUNK_CHARS))
+                overlap = int(
+                    payload.get("overlap", DEFAULT_CHUNK_OVERLAP_CHARS)
+                )
                 self._send_json(
                     self.app.index_paths(
                         paths, chunk_size=chunk_size, overlap=overlap
@@ -668,8 +686,8 @@ def _semantic_option(payload: dict[str, Any]) -> bool | None:
 def create_server(
     app: KnowledgeWebApp,
     rag_config: Callable[[], RagConfig],
-    host: str = "127.0.0.1",
-    port: int = 8000,
+    host: str = DEFAULT_WEB_HOST,
+    port: int = DEFAULT_WEB_PORT,
 ) -> ThreadingHTTPServer:
     handler = KnowledgeRequestHandler
     server = _ExclusiveThreadingHTTPServer((host, port), handler)
@@ -681,8 +699,8 @@ def create_server(
 def run_web(
     *,
     db_path: Path,
-    host: str = "127.0.0.1",
-    port: int = 8000,
+    host: str = DEFAULT_WEB_HOST,
+    port: int = DEFAULT_WEB_PORT,
     upload_dir: Path = DEFAULT_UPLOAD_DIR,
     embedding_backend: EmbeddingBackend | None = None,
 ) -> None:

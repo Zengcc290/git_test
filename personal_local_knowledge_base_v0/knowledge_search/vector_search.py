@@ -9,6 +9,8 @@ from threading import RLock
 
 import numpy as np
 
+from .constants import DEFAULT_RAG_TOP_K
+
 from .database import KnowledgeBase
 from .embedding import EmbeddingBackend, validate_vectors
 from .models import SearchResult
@@ -167,7 +169,7 @@ class SqliteVecVectorIndex:
         self,
         query: str,
         *,
-        top_k: int = 5,
+        top_k: int = DEFAULT_RAG_TOP_K,
         code: bool = False,
         file_type: str | None = None,
         path: Path | None = None,
@@ -266,7 +268,7 @@ class NumpyVectorIndex:
         self,
         query: str,
         *,
-        top_k: int = 5,
+        top_k: int = DEFAULT_RAG_TOP_K,
         code: bool = False,
         file_type: str | None = None,
         path: Path | None = None,

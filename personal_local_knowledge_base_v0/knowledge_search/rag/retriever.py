@@ -9,6 +9,7 @@ from ..database import KnowledgeBase
 from ..embedding import EmbeddingBackend
 from ..models import SearchResult
 from ..vector_search import VectorIndex
+from ..constants import DEFAULT_RAG_MAX_CONTEXT_CHARS, DEFAULT_RAG_TOP_K
 
 
 @dataclass(frozen=True)
@@ -87,8 +88,8 @@ class ChunkRetriever:
         self,
         knowledge_base: KnowledgeBase,
         *,
-        top_k: int = 5,
-        max_context_chars: int = 12_000,
+        top_k: int = DEFAULT_RAG_TOP_K,
+        max_context_chars: int = DEFAULT_RAG_MAX_CONTEXT_CHARS,
     ) -> None:
         if top_k <= 0:
             raise ValueError("top_k 必须大于 0")
@@ -228,8 +229,8 @@ class VectorRetriever(ChunkRetriever):
         knowledge_base: KnowledgeBase,
         embedding_backend: EmbeddingBackend,
         *,
-        top_k: int = 5,
-        max_context_chars: int = 12_000,
+        top_k: int = DEFAULT_RAG_TOP_K,
+        max_context_chars: int = DEFAULT_RAG_MAX_CONTEXT_CHARS,
         code: bool = False,
     ) -> None:
         super().__init__(

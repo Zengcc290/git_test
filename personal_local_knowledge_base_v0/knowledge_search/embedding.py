@@ -17,18 +17,22 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 
+from .constants import (
+    CODE_QUERY_INSTRUCTION,
+    DEFAULT_EMBEDDING_DIMENSION,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_QUERY_INSTRUCTION,
+    DEFAULT_EMBEDDING_BASE_URL,
+    DEFAULT_EMBEDDING_MAX_RETRIES,
+    DEFAULT_EMBEDDING_RETRY_DELAY_SECONDS,
+    DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+    DEFAULT_EMBEDDING_PROTOCOL,
+    DOCUMENT_INPUT_TEMPLATE_VERSION,
+)
+
 
 logger = logging.getLogger(__name__)
-
-
-DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-DEFAULT_QUERY_INSTRUCTION = (
-    "根据用户问题，从知识库中检索能够直接回答问题的相关文档片段"
-)
-CODE_QUERY_INSTRUCTION = (
-    "根据用户问题，从代码库中检索相关的实现、函数、类或调用逻辑"
-)
-DOCUMENT_INPUT_TEMPLATE_VERSION = "qwen3-document-v2-strict-length"
 
 
 @dataclass(frozen=True)
@@ -37,9 +41,9 @@ class EmbeddingSettings:
 
     model_name: str = DEFAULT_EMBEDDING_MODEL
     model_revision: str | None = None
-    dimension: int = 1024
+    dimension: int = DEFAULT_EMBEDDING_DIMENSION
     normalize: bool = True
-    batch_size: int = 8
+    batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     query_instruction: str = DEFAULT_QUERY_INSTRUCTION
 
     def __post_init__(self) -> None:
@@ -182,12 +186,12 @@ class RemoteQwen3EmbeddingModel:
         self,
         settings: EmbeddingSettings | None = None,
         *,
-        base_url: str = "http://127.0.0.1:8000",
+        base_url: str = DEFAULT_EMBEDDING_BASE_URL,
         api_key: str | None = None,
-        timeout: float = 120.0,
-        protocol: str = "auto",
-        max_retries: int = 5,
-        retry_delay: float = 1.0,
+        timeout: float = DEFAULT_EMBEDDING_TIMEOUT_SECONDS,
+        protocol: str = DEFAULT_EMBEDDING_PROTOCOL,
+        max_retries: int = DEFAULT_EMBEDDING_MAX_RETRIES,
+        retry_delay: float = DEFAULT_EMBEDDING_RETRY_DELAY_SECONDS,
     ) -> None:
         self.settings = settings or EmbeddingSettings()
         if not base_url.strip():

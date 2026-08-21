@@ -14,13 +14,18 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
+from .constants import (
+    DEFAULT_JSON_MAX_SIZE,
+    DEFAULT_JSON_RECORD_PROBE_SIZE,
+    DEFAULT_READ_SIZE,
+)
+
 
 _PATH_TOKEN = re.compile(r"(?:([^.[\]]+)|\[(\*|\d+)\])")
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-DEFAULT_JSON_READ_SIZE = 64 * 1024
+DEFAULT_JSON_READ_SIZE = DEFAULT_READ_SIZE
 # 文件上限由调用方按数据源配置；记录级探测另有独立的 512 MiB 逻辑窗口。
-DEFAULT_MAX_JSON_SIZE = 512 * 1024 * 1024
-DEFAULT_JSON_RECORD_PROBE_SIZE = 512 * 1024 * 1024
+DEFAULT_MAX_JSON_SIZE = DEFAULT_JSON_MAX_SIZE
 _SIZE_PATTERN = re.compile(
     r"^\s*(?P<number>\d+(?:\.\d+)?)\s*"
     r"(?P<unit>B|KB|KIB|MB|MIB|GB|GIB|TB|TIB)?\s*$",

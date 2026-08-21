@@ -14,6 +14,11 @@ from pathlib import Path
 from .llm_client import LLMClient, LLMClientError, TokenUsage
 from .prompt import REFUSAL_ANSWER, REFUSAL_PREFIX, build_messages
 from .retriever import ChunkRetriever, RetrievedChunk
+from ..constants import (
+    DEFAULT_RAG_MAX_CONTEXT_CHARS,
+    DEFAULT_RAG_TEMPERATURE,
+    DEFAULT_RAG_TOP_K,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -26,9 +31,9 @@ class CitationValidationError(LLMClientError):
 
 @dataclass(frozen=True)
 class RagConfig:
-    top_k: int = 5
-    max_context_chars: int = 12_000
-    temperature: float = 0.0
+    top_k: int = DEFAULT_RAG_TOP_K
+    max_context_chars: int = DEFAULT_RAG_MAX_CONTEXT_CHARS
+    temperature: float = DEFAULT_RAG_TEMPERATURE
 
     def __post_init__(self) -> None:
         if self.top_k <= 0:
@@ -55,9 +60,11 @@ class RagConfig:
             raise ValueError(f"RAG 配置包含未知字段：{', '.join(unknown)}")
         try:
             return cls(
-                top_k=int(data.get("top_k", 5)),
-                max_context_chars=int(data.get("max_context_chars", 12_000)),
-                temperature=float(data.get("temperature", 0)),
+                top_k=int(data.get("top_k", DEFAULT_RAG_TOP_K)),
+                max_context_chars=int(
+                    data.get("max_context_chars", DEFAULT_RAG_MAX_CONTEXT_CHARS)
+                ),
+                temperature=float(data.get("temperature", DEFAULT_RAG_TEMPERATURE)),
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("RAG 配置字段类型无效") from exc
@@ -82,7 +89,7 @@ class RagAnswerer:
         self,
         retriever: ChunkRetriever,
         *,
-        temperature: float = 0.0,
+        temperature: float = DEFAULT_RAG_TEMPERATURE,
         client_factory: Callable[[], LLMClient] = LLMClient.from_env,
     ) -> None:
         self.retriever = retriever

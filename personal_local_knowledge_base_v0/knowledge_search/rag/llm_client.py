@@ -15,6 +15,8 @@ from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
+from ..constants import DEFAULT_LLM_TIMEOUT_SECONDS, DEFAULT_RAG_TEMPERATURE
+
 
 class LLMClientError(RuntimeError):
     """A user-facing, sanitized LLM configuration or request error."""
@@ -42,7 +44,7 @@ class LLMClient:
         api_key: str,
         base_url: str,
         model: str,
-        timeout_seconds: float = 60.0,
+        timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS,
     ) -> None:
         if not api_key:
             raise LLMClientError("未配置 LLM_API_KEY。")
@@ -102,7 +104,7 @@ class LLMClient:
         self,
         messages: Sequence[Mapping[str, str]],
         *,
-        temperature: float = 0.0,
+        temperature: float = DEFAULT_RAG_TEMPERATURE,
     ) -> LLMResponse:
         payload = json.dumps(
             {

@@ -22,6 +22,7 @@ from .json_parser import (
     iter_json_text,
 )
 from .models import ExtractedDocument
+from .constants import DEFAULT_READ_SIZE
 
 
 # 目前支持纯文本、Markdown、带文本层的 PDF、PPTX 和配置驱动的 JSON。
@@ -30,7 +31,6 @@ SUPPORTED_SUFFIXES = {
     ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp",
 }
 # 单次读取的字节数；它限制 TXT/Markdown 的读取缓存大小。
-DEFAULT_READ_SIZE = 64 * 1024
 # 为当前模块创建独立 logger，便于按模块筛选日志。
 logger = logging.getLogger(__name__)
 

@@ -1,8 +1,8 @@
 {
-  "core_chunk_chars": 800,
+  "core_chunk_chars": 1600,
   "overlap_chars": 200,
-  "min_chunk_chars": 200,
-  "max_chunk_chars": 1600,
+  "min_chunk_chars": 400,
+  "max_chunk_chars": 3200,
   "max_chunk_tokens": 8192,
   "semantic_merge_threshold": 0.8,
   "embedding_model": "Qwen/Qwen3-Embedding-0.6B",

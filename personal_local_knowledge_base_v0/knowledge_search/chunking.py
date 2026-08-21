@@ -7,6 +7,14 @@ from dataclasses import dataclass, replace
 
 # Chunk 是分段结果的数据结构。
 from .block_parsing import build_embedding_content
+from .constants import (
+    DEFAULT_CHUNK_OVERLAP_CHARS,
+    DEFAULT_CORE_CHUNK_CHARS,
+    DEFAULT_MAX_CHUNK_CHARS,
+    DEFAULT_MAX_CHUNK_TOKENS,
+    DEFAULT_MIN_CHUNK_CHARS,
+    DEFAULT_SEMANTIC_MERGE_THRESHOLD,
+)
 from .embedding import (
     EmbeddingBackend,
     cosine_similarity,
@@ -20,12 +28,12 @@ from .models import Chunk, DocumentBlock
 class ChunkingConfig:
     """Stable V5 chunking parameters; its fingerprint participates in caching."""
 
-    core_chunk_chars: int = 800
-    overlap_chars: int = 200
-    min_chunk_chars: int = 200
-    max_chunk_chars: int = 1600
-    semantic_merge_threshold: float = 0.80
-    max_chunk_tokens: int = 8192
+    core_chunk_chars: int = DEFAULT_CORE_CHUNK_CHARS
+    overlap_chars: int = DEFAULT_CHUNK_OVERLAP_CHARS
+    min_chunk_chars: int = DEFAULT_MIN_CHUNK_CHARS
+    max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS
+    semantic_merge_threshold: float = DEFAULT_SEMANTIC_MERGE_THRESHOLD
+    max_chunk_tokens: int = DEFAULT_MAX_CHUNK_TOKENS
 
     def __post_init__(self) -> None:
         if self.core_chunk_chars <= 0:
@@ -99,8 +107,8 @@ def _find_stream_split_end(text: str, chunk_size: int) -> int:
 
 def iter_chunk_text(
     text_chunks: Iterable[str],
-    chunk_size: int = 800,
-    overlap: int = 200,
+    chunk_size: int = DEFAULT_CORE_CHUNK_CHARS,
+    overlap: int = DEFAULT_CHUNK_OVERLAP_CHARS,
 ) -> Iterator[Chunk]:
     """把文本块流式切分为 Chunk，内存中最多保留一个窗口及其重叠部分。"""
 
@@ -135,7 +143,11 @@ def iter_chunk_text(
         yield Chunk(index=chunk_index, content=buffer.strip())
 
 
-def chunk_text(text: str, chunk_size: int = 800, overlap: int = 200) -> list[Chunk]:
+def chunk_text(
+    text: str,
+    chunk_size: int = DEFAULT_CORE_CHUNK_CHARS,
+    overlap: int = DEFAULT_CHUNK_OVERLAP_CHARS,
+) -> list[Chunk]:
     """兼容小文本调用，并复用流式实现保证相邻分段始终保留重叠。"""
 
     # [text] 只包装调用者已经提供的这段文本；大文件索引路径使用 iter_chunk_text。
@@ -144,13 +156,13 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 200) -> list[Chu
 
 def iter_chunk_blocks(
     blocks: Iterable[DocumentBlock],
-    chunk_size: int = 800,
-    overlap: int = 200,
+    chunk_size: int = DEFAULT_CORE_CHUNK_CHARS,
+    overlap: int = DEFAULT_CHUNK_OVERLAP_CHARS,
     *,
-    min_chunk_chars: int = 200,
-    max_chunk_chars: int = 1600,
-    semantic_merge_threshold: float = 0.80,
-    max_chunk_tokens: int = 8192,
+    min_chunk_chars: int = DEFAULT_MIN_CHUNK_CHARS,
+    max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    semantic_merge_threshold: float = DEFAULT_SEMANTIC_MERGE_THRESHOLD,
+    max_chunk_tokens: int = DEFAULT_MAX_CHUNK_TOKENS,
     embedding_backend: EmbeddingBackend | None = None,
 ) -> Iterator[Chunk]:
     """Chunk on non-overlapping cores, merge semantically, then add context."""
@@ -269,13 +281,13 @@ def iter_chunk_blocks(
 
 def iter_chunk_blocks_batched(
     blocks: Iterable[DocumentBlock],
-    chunk_size: int = 800,
-    overlap: int = 200,
+    chunk_size: int = DEFAULT_CORE_CHUNK_CHARS,
+    overlap: int = DEFAULT_CHUNK_OVERLAP_CHARS,
     *,
-    min_chunk_chars: int = 200,
-    max_chunk_chars: int = 1600,
-    semantic_merge_threshold: float = 0.80,
-    max_chunk_tokens: int = 8192,
+    min_chunk_chars: int = DEFAULT_MIN_CHUNK_CHARS,
+    max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    semantic_merge_threshold: float = DEFAULT_SEMANTIC_MERGE_THRESHOLD,
+    max_chunk_tokens: int = DEFAULT_MAX_CHUNK_TOKENS,
     embedding_backend: EmbeddingBackend | None = None,
 ) -> Iterator[Chunk]:
     """Chunk a block stream with bounded core/final embedding batches.
